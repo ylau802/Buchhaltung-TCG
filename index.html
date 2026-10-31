@@ -1323,7 +1323,8 @@ if('serviceWorker' in navigator&&(location.protocol==='https:'||location.hostnam
     if(e.data&&e.data.go==='news'){ try{ history.replaceState(null,'','#news'); }catch(_){} if(session&&$('#lock').hidden) go('news'); }
   });
 }
-const frChips=(sel,attr)=>newsCatalog().map(n=>`<button type="button" class="frchip ${sel.includes(n)?'on':''}" ${attr}="${esc(n)}">${esc(n)}</button>`).join('');
+const sfr=s=>Array.isArray(s.fr)?s.fr:[]; // ältere Worker-Versionen liefern kein fr pro Quelle
+const frChips=(sel,attr)=>newsCatalog().map(n=>`<button type="button" class="frchip ${(sel||[]).includes(n)?'on':''}" ${attr}="${esc(n)}">${esc(n)}</button>`).join('');
 async function saveSourceFr(id,fr){ await loadNews('/sources/'+id,'PUT',{fr}); }
 async function saveCustom(list){ await loadNews('/franchises','PUT',{custom:list}); }
 function viewNews(){
@@ -1402,14 +1403,14 @@ function viewNews(){
       <tbody>${S.map(s=>`<tr>
         <td><a href="${esc(s.url)}" target="_blank" rel="noopener" style="color:var(--ink);font-weight:500;text-decoration:none">${esc(s.name)}</a></td>
         <td><span class="chip">${esc(s.type)}</span></td>
-        <td class="cell-wrap">${s.fr.length?s.fr.map(n=>`<span class="chip">${esc(n)}</span>`).join(' '):'<span class="count">alle Produkte</span>'}
+        <td class="cell-wrap">${sfr(s).length?sfr(s).map(n=>`<span class="chip">${esc(n)}</span>`).join(' '):'<span class="count">alle Produkte</span>'}
           <button class="btn ghost sm" data-fedit="${esc(s.id)}" style="margin-left:4px">${news.fedit===s.id?'fertig':'ändern'}</button></td>
         <td class="cell-wrap">${srcStatus(s)}</td>
         <td><button class="btn ghost sm" data-soff="${esc(s.id)}">${s.off?'Fortsetzen':'Pausieren'}</button>
             <button class="btn ghost sm" data-sdel="${esc(s.id)}">Löschen</button></td>
       </tr>${news.fedit===s.id?`<tr><td colspan="5" style="background:var(--surface-2);white-space:normal">
         <div class="cap" style="margin-bottom:6px">Bei <b>${esc(s.name)}</b> melden für (nichts angehakt = alle Produkte; eine Änderung liest die Quelle still neu ein, ohne Meldungs-Flut):</div>
-        <div class="frwrap">${frChips(s.fr,'data-fs')}</div></td></tr>`:''}`).join('')}</tbody></table></div>`:''}
+        <div class="frwrap">${frChips(sfr(s),'data-fs')}</div></td></tr>`:''}`).join('')}</tbody></table></div>`:''}
   </div>`:''}
   <div class="toolbar">
     <div class="field"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4-4"/></svg>
@@ -1451,7 +1452,7 @@ function wireNews(){
   $$('[data-wdel]').forEach(b=>b.onclick=()=>loadNews('/sources/'+b.dataset.wdel,'DELETE'));
   const u=$('#nUrls'); if(u)u.oninput=()=>{news.urls=u.value;};
   $$('[data-fa]').forEach(b=>b.onclick=()=>{ const n=b.dataset.fa; news.addFr=news.addFr.includes(n)?news.addFr.filter(x=>x!==n):[...news.addFr,n]; const u=$('#nUrls'); if(u)news.urls=u.value; draw(); });
-  $$('[data-fs]').forEach(b=>b.onclick=()=>{ const s=news.data.sources.find(x=>x.id===news.fedit); const n=b.dataset.fs; saveSourceFr(s.id,s.fr.includes(n)?s.fr.filter(x=>x!==n):[...s.fr,n]); });
+  $$('[data-fs]').forEach(b=>b.onclick=()=>{ const s=news.data.sources.find(x=>x.id===news.fedit); const n=b.dataset.fs, fr=sfr(s); saveSourceFr(s.id,fr.includes(n)?fr.filter(x=>x!==n):[...fr,n]); });
   $$('[data-fedit]').forEach(b=>b.onclick=()=>{ news.fedit=news.fedit===b.dataset.fedit?null:b.dataset.fedit; draw(); });
   const cn=$('#cfName'); if(cn)cn.oninput=()=>{news.cfName=cn.value;};
   const ck=$('#cfKw'); if(ck)ck.oninput=()=>{news.cfKw=ck.value;};
