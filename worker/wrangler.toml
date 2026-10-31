@@ -6,13 +6,15 @@ workers_dev = true
 # Wird von  wrangler kv namespace create DB  gefüllt:
 [[kv_namespaces]]
 binding = "DB"
-id = "5fb396d04a8b429eb0f19f21b9d94b80"
+id = "89e6489134074ceaba2d4f0c1b5b3c1e"
 
 # Optional, für PDF-Belege. Wird von  wrangler r2 bucket create yingway-files  gefüllt
 # (siehe SETUP-SYNC.md) – ohne diesen Block laufen Vault-Sync weiter, nur Belege nicht.
-[[r2_buckets]]
-binding = "FILES"
-bucket_name = "yingway-files"
+# R2 ist im Konto noch nicht freigeschaltet (Dashboard -> R2 -> aktivieren,
+# danach  wrangler r2 bucket create yingway-files  und die drei Zeilen wieder einkommentieren):
+#[[r2_buckets]]
+#binding = "FILES"
+#bucket_name = "yingway-files"
 
 # News-Monitor: alle 5 Minuten die nächsten Shops prüfen.
 [triggers]
