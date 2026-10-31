@@ -10,11 +10,22 @@ on:
     types: [opened, assigned]
 jobs:
   claude:
+    # Nur der Repo-Owner darf den Workflow auslösen. Das Repo ist öffentlich,
+    # und issue_comment feuert bei jedem Kommentar – ohne diese Prüfung könnte
+    # jeder Fremde einen Job mit contents: write starten.
     if: |
-      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
-      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
-      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
-      (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
+      (github.event_name == 'issue_comment' &&
+        contains(github.event.comment.body, '@claude') &&
+        github.event.comment.author_association == 'OWNER') ||
+      (github.event_name == 'pull_request_review_comment' &&
+        contains(github.event.comment.body, '@claude') &&
+        github.event.comment.author_association == 'OWNER') ||
+      (github.event_name == 'pull_request_review' &&
+        contains(github.event.review.body, '@claude') &&
+        github.event.review.author_association == 'OWNER') ||
+      (github.event_name == 'issues' &&
+        (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')) &&
+        github.event.issue.author_association == 'OWNER')
     runs-on: ubuntu-latest
     permissions:
       contents: write
