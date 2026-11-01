@@ -1248,16 +1248,31 @@ async function loadNews(path,method,body){
   catch(e){ news.err=e.message||'Fehler'; }
   news.loading=false; renderNav(); if(route==='news') draw();
 }
+// Eine Zeile pro Quelle, optional „URL | eigener Name“. Ohne Strich bleiben wie bisher
+// mehrere URLs auf einer Zeile erlaubt.
+function parseSourceLines(text){
+  const out=[];
+  for(const line of String(text).split('\n')){
+    const l=line.trim(); if(!l) continue;
+    const i=l.indexOf('|');
+    if(i<0) l.split(/\s+/).filter(Boolean).forEach(u=>out.push({url:u,name:''}));
+    else { const u=l.slice(0,i).trim(), n=l.slice(i+1).trim(); if(u) out.push({url:u,name:n}); }
+  }
+  return out;
+}
 async function addSources(){
-  const urls=news.urls.split(/\s+/).map(s=>s.trim()).filter(Boolean);
-  if(!urls.length||news.loading) return;
+  const items=parseSourceLines(news.urls);
+  if(!items.length||news.loading) return;
   news.loading=true; news.msgs=[]; draw();
   try{
-    for(let i=0;i<urls.length;i+=8){
-      const j=await newsCall('/sources','POST',{urls:urls.slice(i,i+8),fr:news.addFr});
+    for(let i=0;i<items.length;i+=8){
+      const part=items.slice(i,i+8);
+      const j=await newsCall('/sources','POST',{urls:part.map(x=>x.url),names:part.map(x=>x.name),fr:news.addFr});
       news.msgs.push(...j.results);
     }
-    news.urls=news.msgs.filter(m=>!m.ok&&m.error!=='schon vorhanden').map(m=>m.url).join('\n');
+    const nameOf=new Map(items.map(x=>[x.url,x.name]));   // Name bei einem Fehlschlag nicht verlieren
+    news.urls=news.msgs.filter(m=>!m.ok&&m.error!=='schon vorhanden')
+      .map(m=>m.url+(nameOf.get(m.url)?' | '+nameOf.get(m.url):'')).join('\n');
   }catch(e){ news.err=e.message||'Fehler'; }
   news.loading=false;
   await loadNews('/check','POST'); // neue Quellen sofort einlesen (erster Lauf = nur Stand merken, keine Mail)
@@ -1460,8 +1475,8 @@ function viewNews(){
   </div>`:''}
   ${news.showSrc&&d?`<div class="card">
     <h2>Quellen</h2>
-    <div class="cap">Shops, die geprüft werden. Unterstützt: <b>Shopify</b>- und <b>WooCommerce</b>-Shops (am besten die Kategorie-/Kollektions-URL, z. B. <span class="mono">https://cardtreasure.ch/collections/…</span>) und wog.ch. Pro Quelle wird bei Neuem, Preisänderung und „wieder verfügbar“ gemeldet.</div>
-    <textarea id="nUrls" rows="4" placeholder="Eine Shop-URL pro Zeile …" style="width:100%;background:var(--surface);border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:8px 10px;font:inherit;font-size:13px">${esc(news.urls)}</textarea>
+    <div class="cap">Shops, die geprüft werden. Unterstützt: <b>Shopify</b>- und <b>WooCommerce</b>-Shops (am besten die Kategorie-/Kollektions-URL, z. B. <span class="mono">https://cardtreasure.ch/collections/…</span>) und wog.ch. Pro Quelle wird bei Neuem, Preisänderung und „wieder verfügbar“ gemeldet. Eigener Name gleich mit: <span class="mono">URL | Card Treasure</span> – sonst nimmt die App den Namen des Shops.</div>
+    <textarea id="nUrls" rows="4" placeholder="Eine Shop-URL pro Zeile – optional: URL | eigener Name" style="width:100%;background:var(--surface);border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:8px 10px;font:inherit;font-size:13px">${esc(news.urls)}</textarea>
     <div class="toolbar" style="margin:8px 0 0">
       <button class="btn sm" id="nAdd" ${news.loading?'disabled':''}>Hinzufügen</button>
     </div>

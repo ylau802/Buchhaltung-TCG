@@ -790,9 +790,12 @@ async function handleNews(request, env, url, tokenHash) {
     let body;
     try { body = await request.json(); } catch (e) { return text('bad json', 400); }
     const urls = (Array.isArray(body.urls) ? body.urls : []).map((x) => String(x).trim()).filter(Boolean).slice(0, 8);
+    // Optional: eigener Name je URL, gleiche Reihenfolge wie urls. Leer = Name des Shops.
+    const names = (Array.isArray(body.names) ? body.names : []).map((x) => String(x || '').trim().slice(0, 60));
     const cfg = await readCfg(env);
     const results = [];
-    for (const raw of urls) {
+    for (let k = 0; k < urls.length; k++) {
+      const raw = urls[k];
       try {
         if (cfg.sources.length >= MAX_SOURCES) throw new Error('maximal ' + MAX_SOURCES + ' Quellen');
         const d = await detectSource(raw);
@@ -803,8 +806,9 @@ async function handleNews(request, env, url, tokenHash) {
         const known = CATALOG.map((c) => c[0]);
         let fr = Array.isArray(body.fr) ? body.fr.filter((n) => known.includes(n)) : DEFAULT_FR.slice();
         if (CATALOG.some(([, re]) => re.test(readable))) fr = [];
-        cfg.sources.push(Object.assign({ id, name: d.name, url: d.url, type: d.type, fr }, d.cat ? { cat: d.cat } : {}));
-        results.push({ url: raw, ok: true, name: d.name, type: d.type, fr });
+        const name = names[k] || d.name;
+        cfg.sources.push(Object.assign({ id, name, url: d.url, type: d.type, fr }, d.cat ? { cat: d.cat } : {}));
+        results.push({ url: raw, ok: true, name, type: d.type, fr });
       } catch (e) { results.push({ url: raw, ok: false, error: e.message }); }
     }
     await env.DB.put(CFG_KEY, JSON.stringify(cfg));
