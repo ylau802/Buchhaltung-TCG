@@ -10,7 +10,7 @@ self.addEventListener('push', (event) => {
   event.waitUntil(self.registration.showNotification(d.t || 'YL News', {
     body: d.b || 'Neue Meldungen im News-Dashboard.',
     icon: 'icons/icon-192.png',
-    badge: 'icons/badge-96.png',
+    badge: 'icons/badge-mono-96.png',
     tag: 'yingway-news',
     renotify: true,
     data: { go: 'news' },
