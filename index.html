@@ -311,6 +311,12 @@ thead th:first-child,thead th:last-child{z-index:4}
   .toolbar{gap:7px}
   input[type=search]{min-width:0;flex:1}
 }
+/* Quelle umbenennen: Stift neben dem Namen, daraus wird ein Eingabefeld */
+td .iconbtn{display:inline-grid;width:26px;height:26px;margin-left:6px;vertical-align:middle}
+td .iconbtn svg{width:13px;height:13px}
+.srename{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.srename input{flex:1;min-width:140px}
+
 .fr-in{width:210px}
 .fr-in-kw{width:230px}
 
@@ -1207,7 +1213,7 @@ function viewLager(){
 }
 
 /* ---------- News (Shop-Monitor, läuft im Worker) ---------- */
-const news={data:null,loading:false,err:'',fr:'',kind:'',src:'',q:'',showSrc:false,showWatch:false,urls:'',addFr:['Pokémon','One Piece','Dragon Ball'],fedit:null,cfName:'',cfKw:'',msgs:[],auto:false,chat:[],wurls:'',wbusy:false};
+const news={data:null,loading:false,err:'',fr:'',kind:'',src:'',q:'',showSrc:false,showWatch:false,urls:'',addFr:['Pokémon','One Piece','Dragon Ball'],fedit:null,ren:null,cfName:'',cfKw:'',msgs:[],auto:false,chat:[],wurls:'',wbusy:false};
 const newsCatalog=()=>(news.data&&news.data.catalog)||['Pokémon','One Piece','Dragon Ball'];
 const NEWS_KIND={new:'Neu',price:'Preis',stock:'Wieder verfügbar'};
 // Ereignisse der letzten 24 h
@@ -1377,6 +1383,13 @@ if('serviceWorker' in navigator&&(location.protocol==='https:'||location.hostnam
 const sfr=s=>Array.isArray(s.fr)?s.fr:[]; // ältere Worker-Versionen liefern kein fr pro Quelle
 const frChips=(sel,attr)=>newsCatalog().map(n=>`<button type="button" class="frchip ${(sel||[]).includes(n)?'on':''}" ${attr}="${esc(n)}">${esc(n)}</button>`).join('');
 async function saveSourceFr(id,fr){ await loadNews('/sources/'+id,'PUT',{fr}); }
+// Quellen heissen so, wie der Shop sie liefert – oft ellenlang. Eigener Name, 60 Zeichen.
+async function saveSourceName(id){
+  const el=$('#srenIn'), name=(el?el.value:'').trim();
+  news.ren=null;
+  if(!name) return draw();
+  await loadNews('/sources/'+id,'PUT',{name});
+}
 async function saveCustom(list){ await loadNews('/franchises','PUT',{custom:list}); }
 function viewNews(){
   if(!NEWS_BASE) return `<div class="phead"><div><h1>News</h1></div></div>
@@ -1452,7 +1465,12 @@ function viewNews(){
     ${S.length?`<div class="tbl-wrap" style="margin-top:14px"><table>
       <thead><tr><th>Quelle</th><th>Typ</th><th>Franchises</th><th>Status</th><th></th></tr></thead>
       <tbody>${S.map(s=>`<tr>
-        <td data-l=""><a href="${esc(s.url)}" target="_blank" rel="noopener" style="color:var(--ink);font-weight:500;text-decoration:none">${esc(s.name)}</a></td>
+        <td data-l="" class="cell-wrap">${news.ren===s.id
+          ? `<div class="srename"><input type="text" id="srenIn" maxlength="60" value="${esc(s.name)}">
+               <button class="btn sm" data-srok="${esc(s.id)}">Speichern</button>
+               <button class="btn ghost sm" data-srno="1">Abbrechen</button></div>`
+          : `<a href="${esc(s.url)}" target="_blank" rel="noopener" style="color:var(--ink);font-weight:500;text-decoration:none">${esc(s.name)}</a>
+             <button class="iconbtn" data-sren="${esc(s.id)}" title="Quelle umbenennen" aria-label="Quelle umbenennen"><svg viewBox="0 0 24 24"><path d="M4 20h4l10-10-4-4L4 16v4z"/><path d="M13.5 6.5l4 4"/></svg></button>`}</td>
         <td data-l="Typ"><span class="chip">${esc(s.type)}</span></td>
         <td data-l="Franchises" class="cell-wrap">${sfr(s).length?sfr(s).map(n=>`<span class="chip">${esc(n)}</span>`).join(' '):'<span class="count">alle Produkte</span>'}
           <button class="btn ghost sm" data-fedit="${esc(s.id)}" style="margin-left:4px">${news.fedit===s.id?'fertig':'ändern'}</button></td>
@@ -1505,6 +1523,13 @@ function wireNews(){
   $$('[data-fa]').forEach(b=>b.onclick=()=>{ const n=b.dataset.fa; news.addFr=news.addFr.includes(n)?news.addFr.filter(x=>x!==n):[...news.addFr,n]; const u=$('#nUrls'); if(u)news.urls=u.value; draw(); });
   $$('[data-fs]').forEach(b=>b.onclick=()=>{ const s=news.data.sources.find(x=>x.id===news.fedit); const n=b.dataset.fs, fr=sfr(s); saveSourceFr(s.id,fr.includes(n)?fr.filter(x=>x!==n):[...fr,n]); });
   $$('[data-fedit]').forEach(b=>b.onclick=()=>{ news.fedit=news.fedit===b.dataset.fedit?null:b.dataset.fedit; draw(); });
+  $$('[data-sren]').forEach(b=>b.onclick=()=>{ news.ren=b.dataset.sren; draw();
+    const el=$('#srenIn'); if(el){ el.focus(); el.select(); } });
+  $$('[data-srok]').forEach(b=>b.onclick=()=>saveSourceName(b.dataset.srok));
+  $$('[data-srno]').forEach(b=>b.onclick=()=>{ news.ren=null; draw(); });
+  const sr=$('#srenIn'); if(sr)sr.onkeydown=e=>{
+    if(e.key==='Enter'){ e.preventDefault(); saveSourceName(news.ren); }
+    if(e.key==='Escape'){ news.ren=null; draw(); } };
   const cn=$('#cfName'); if(cn)cn.oninput=()=>{news.cfName=cn.value;};
   const ck=$('#cfKw'); if(ck)ck.oninput=()=>{news.cfKw=ck.value;};
   const ca=$('#cfAdd'); if(ca)ca.onclick=async()=>{
