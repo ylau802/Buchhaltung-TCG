@@ -967,6 +967,7 @@ function viewOverview(){
       ${SYNC?`<button class="btn ghost sm" id="dPull"><svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 10-2.3 5.7M20 4v7h-7"/></svg>Aus Cloud neu laden</button>`:''}
       <button class="btn ghost sm" id="dBackup"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>Verschlüsseltes Backup</button>
       <button class="btn ghost sm" id="dImport"><svg viewBox="0 0 24 24"><path d="M12 15V3M7 8l5-5 5 5M5 21h14"/></svg>Backup / Datei einspielen</button>
+      <button class="btn ghost sm" id="dAdd" title="Vorbereitete Einträge aus einer JSON-Datei anfügen, ohne die vorhandenen zu ersetzen"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>Einträge anfügen</button>
       <button class="btn ghost sm" id="dJson">JSON-Export (offen)</button>
       <button class="btn ghost sm" id="dPass">Passphrase ändern</button>
       <div class="spacer"></div>
@@ -1619,6 +1620,7 @@ function wire(){
   const ex=$('#exportBtn'); if(ex)ex.onclick=exportCSV;
   const bind=(id,fn)=>{ const el=$('#'+id); if(el)el.onclick=fn; };
   bind('dBackup',exportVault); bind('dImport',importData); bind('dJson',exportJSON);
+  bind('dAdd',addEntries);
   bind('dPass',changePass); bind('dReset',resetDevice);
   bind('dPull',async()=>{ toast('Lade aus der Cloud…'); syncRev=0; await syncPull(false);
     if(syncState==='ok') toast('Aktueller Stand geladen'); draw(); });
@@ -2074,6 +2076,33 @@ function importData(){
     await persistNow(); toast('Daten importiert');
     if(SYNC){ syncRev=0; await syncPush(true); }
     draw();
+  };
+  inp.click();
+}
+// Einträge aus einer Datei ANFÜGEN (im Gegensatz zu „Backup einspielen“, das alles ersetzt).
+// Gedacht für vorbereitete Listen, z. B. einen Monat Cardmarket-Einkäufe.
+function addEntries(){
+  const inp=document.createElement('input'); inp.type='file'; inp.accept='.json,application/json';
+  inp.onchange=async()=>{
+    const file=inp.files[0]; if(!file) return;
+    let data=null;
+    try{ data=JSON.parse(await file.text()); }catch(e){ toast('Keine lesbare JSON-Datei'); return; }
+    if(!data||!LEDGERS.some(L=>Array.isArray(data[L]))){ toast('Keine Einträge in der Datei'); return; }
+    const neu={}; let n=0;
+    for(const L of LEDGERS){
+      const have=new Set(store[L].map(r=>r.id));
+      neu[L]=(data[L]||[]).filter(r=>r&&typeof r==='object').map(r=>{
+        const row={...r}; delete row._ym;
+        if(!row.id||have.has(row.id)) row.id=uid();
+        have.add(row.id); return row; });
+      n+=neu[L].length;
+    }
+    if(!n){ toast('Keine Einträge in der Datei'); return; }
+    const lines=LEDGERS.filter(L=>neu[L].length).map(L=>`${neu[L].length} ${TITLES[L][0]}`).join(', ');
+    if(!confirm(`${n} Eintr${n===1?'ag':'äge'} anfügen (${lines})?\n\nVorhandene Einträge bleiben unverändert.`)) return;
+    for(const L of LEDGERS) store[L].push(...neu[L]);
+    await persistNow(); if(SYNC) await syncPush(true);
+    page=0; draw(); toast(n+(n===1?' Eintrag':' Einträge')+' angefügt');
   };
   inp.click();
 }
