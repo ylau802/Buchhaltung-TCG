@@ -1,5 +1,5 @@
 /*
- * Yingway Sync – Cloudflare Worker
+ * YL Sync – Cloudflare Worker
  *
  * Speichert genau EINEN verschlüsselten Datenblock ("vault") in KV, plus
  * optional verschlüsselte PDF-Belege in einem R2-Bucket. Der Worker sieht
@@ -47,7 +47,7 @@ const STATE_KEY = 'watch:state';
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
 
 const WOG_LIST = 'https://www.wog.ch/de/index.cfm/ajax.productList';
-const WATCH_UA = 'Mozilla/5.0 (compatible; YingwayMonitor/1.0; +https://yingsiulau.github.io/yingway/)';
+const WATCH_UA = 'Mozilla/5.0 (compatible; YLMonitor/1.0; +https://ylau802.github.io/Buchhaltung-TCG/)';
 const MAX_SOURCES = 100;
 const MAX_PAGES = 4;          // Shopify: bis 4 x 250 Produkte pro Kollektion
 const EVENTS_KEEP = 500;
@@ -561,7 +561,7 @@ async function sendMail(env, events, test) {
   const parts = [['new', 'neu'], ['price', 'Preis'], ['stock', 'wieder verfügbar']].filter(([k]) => count(k)).map(([k, l]) => count(k) + ' ' + l);
   const html = '<div style="font-family:-apple-system,Segoe UI,sans-serif;max-width:580px">' +
     '<h2 style="margin:0 0 4px">' + (test ? 'Testmail – ' : '') + esc(parts.join(' · ')) + '</h2>' +
-    '<p style="color:#777;margin:0 0 12px;font-size:13px">Yingway News</p>' +
+    '<p style="color:#777;margin:0 0 12px;font-size:13px">YL News</p>' +
     '<table style="border-collapse:collapse;width:100%">' + shown.map(row).join('') + '</table>' +
     (more > 0 ? '<p style="color:#777">… und ' + more + ' weitere in der App unter News.</p>' : '') + '</div>';
   const textBody = shown.map((ev) => '[' + KIND_LABEL[ev.k] + ' · ' + ev.s + '] ' + ev.t + '\n' + describe(ev) + '\n' + ev.u).join('\n\n');
@@ -570,7 +570,7 @@ async function sendMail(env, events, test) {
   const res = await fetch('https://api.resend.com/emails', {
     method: 'POST',
     headers: { Authorization: 'Bearer ' + env.RESEND_API_KEY, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ from: env.NEWS_FROM || 'Yingway News <onboarding@resend.dev>', to, subject, html, text: textBody }),
+    body: JSON.stringify({ from: env.NEWS_FROM || 'YL News <onboarding@resend.dev>', to, subject, html, text: textBody }),
   });
   if (!res.ok) throw new Error('Resend: HTTP ' + res.status + ' ' + (await res.text()).slice(0, 200));
   return { sent: to.length };
