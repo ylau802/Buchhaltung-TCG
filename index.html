@@ -311,9 +311,9 @@ thead th:first-child,thead th:last-child{z-index:4}
   .toolbar{gap:7px}
   input[type=search]{min-width:0;flex:1}
 }
-/* Quelle umbenennen: Stift neben dem Namen, daraus wird ein Eingabefeld */
-td .iconbtn{display:inline-grid;width:26px;height:26px;margin-left:6px;vertical-align:middle}
-td .iconbtn svg{width:13px;height:13px}
+/* Umbenennen: Stift neben dem Namen, daraus wird ein Eingabefeld */
+.renbtn{display:inline-grid;width:26px;height:26px;margin-left:6px;vertical-align:middle}
+.renbtn svg{width:13px;height:13px}
 .srename{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
 .srename input{flex:1;min-width:140px}
 
@@ -1213,7 +1213,7 @@ function viewLager(){
 }
 
 /* ---------- News (Shop-Monitor, läuft im Worker) ---------- */
-const news={data:null,loading:false,err:'',fr:'',kind:'',src:'',q:'',showSrc:false,showWatch:false,urls:'',addFr:['Pokémon','One Piece','Dragon Ball'],fedit:null,ren:null,cfName:'',cfKw:'',msgs:[],auto:false,chat:[],wurls:'',wbusy:false};
+const news={data:null,loading:false,err:'',fr:'',kind:'',src:'',q:'',showSrc:false,showWatch:false,urls:'',addFr:[],fedit:null,ren:null,cfName:'',cfKw:'',msgs:[],auto:false,chat:[],wurls:'',wbusy:false};
 const newsCatalog=()=>(news.data&&news.data.catalog)||['Pokémon','One Piece','Dragon Ball'];
 const NEWS_KIND={new:'Neu',price:'Preis',stock:'Wieder verfügbar'};
 // Ereignisse der letzten 24 h
@@ -1381,7 +1381,9 @@ if('serviceWorker' in navigator&&(location.protocol==='https:'||location.hostnam
   });
 }
 const sfr=s=>Array.isArray(s.fr)?s.fr:[]; // ältere Worker-Versionen liefern kein fr pro Quelle
-const frChips=(sel,attr)=>newsCatalog().map(n=>`<button type="button" class="frchip ${(sel||[]).includes(n)?'on':''}" ${attr}="${esc(n)}">${esc(n)}</button>`).join('');
+// Erster Chip ist „Alle Produkte“ (= kein Filter, leere Liste); danach die einzelnen Franchises.
+const frChips=(sel,attr)=>`<button type="button" class="frchip ${(sel||[]).length?'':'on'}" ${attr}="*">Alle Produkte</button>`
+  +newsCatalog().map(n=>`<button type="button" class="frchip ${(sel||[]).includes(n)?'on':''}" ${attr}="${esc(n)}">${esc(n)}</button>`).join('');
 async function saveSourceFr(id,fr){ await loadNews('/sources/'+id,'PUT',{fr}); }
 // Quellen heissen so, wie der Shop sie liefert – oft ellenlang. Eigener Name, 60 Zeichen.
 async function saveSourceName(id){
@@ -1440,7 +1442,12 @@ function viewNews(){
     ${W.length?`<h2 style="font-size:14px;margin:18px 0 4px">Aktiv beobachtet (${W.length})</h2>
       ${W.map(s=>{ const c=s.st&&s.st.cur; return `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-top:1px solid var(--line-soft)">
         ${s.img?`<img src="${esc(s.img)}" alt="" loading="lazy" style="width:36px;height:36px;object-fit:contain;border-radius:6px;flex:none;background:#fff;padding:2px">`:''}
-        <span style="flex:1;min-width:0"><a href="${esc(s.url)}" target="_blank" rel="noopener" style="color:var(--ink);font-weight:500;text-decoration:none">${esc(s.name)}</a><br>
+        <span style="flex:1;min-width:0">${news.ren===s.id
+          ? `<span class="srename"><input type="text" id="srenIn" maxlength="60" value="${esc(s.name)}">
+               <button class="btn sm" data-srok="${esc(s.id)}">Speichern</button>
+               <button class="btn ghost sm" data-srno="1">Abbrechen</button></span>`
+          : `<a href="${esc(s.url)}" target="_blank" rel="noopener" style="color:var(--ink);font-weight:500;text-decoration:none">${esc(s.name)}</a>
+             <button class="iconbtn renbtn" data-sren="${esc(s.id)}" title="Umbenennen" aria-label="Umbenennen"><svg viewBox="0 0 24 24"><path d="M4 20h4l10-10-4-4L4 16v4z"/><path d="M13.5 6.5l4 4"/></svg></button>`}<br>
           <span class="count">${esc(s.shop||'')} · ${c?(c.p==null?'Preis folgt':CHF(c.p))+' · '+statusDot(c.a):'noch nicht geprüft'}${s.st&&s.st.lastError?` · <span class="neg">${esc(s.st.lastError)}</span>`:''}</span></span>
         <button class="btn ghost sm" data-wdel="${esc(s.id)}">Entfernen</button></div>`; }).join('')}`:''}
   </div>`:''}
@@ -1451,7 +1458,7 @@ function viewNews(){
     <div class="toolbar" style="margin:8px 0 0">
       <button class="btn sm" id="nAdd" ${news.loading?'disabled':''}>Hinzufügen</button>
     </div>
-    <div style="margin-top:10px"><div class="cap" style="margin-bottom:6px">Melden bei diesen Franchises (nichts angehakt = <b>alle</b> Produkte der Quelle):</div>
+    <div style="margin-top:10px"><div class="cap" style="margin-bottom:6px">Wonach soll gemeldet werden? <b>Alle Produkte</b> nimmt den ganzen Shop, sonst einzelne Franchises anklicken:</div>
       <div class="frwrap">${frChips(news.addFr,'data-fa')}</div></div>
     <div class="toolbar" style="margin:10px 0 0">
       <input type="text" id="cfName" class="fr-in" placeholder="Eigenes Franchise, z. B. Marvel" value="${esc(news.cfName)}">
@@ -1470,7 +1477,7 @@ function viewNews(){
                <button class="btn sm" data-srok="${esc(s.id)}">Speichern</button>
                <button class="btn ghost sm" data-srno="1">Abbrechen</button></div>`
           : `<a href="${esc(s.url)}" target="_blank" rel="noopener" style="color:var(--ink);font-weight:500;text-decoration:none">${esc(s.name)}</a>
-             <button class="iconbtn" data-sren="${esc(s.id)}" title="Quelle umbenennen" aria-label="Quelle umbenennen"><svg viewBox="0 0 24 24"><path d="M4 20h4l10-10-4-4L4 16v4z"/><path d="M13.5 6.5l4 4"/></svg></button>`}</td>
+             <button class="iconbtn renbtn" data-sren="${esc(s.id)}" title="Quelle umbenennen" aria-label="Quelle umbenennen"><svg viewBox="0 0 24 24"><path d="M4 20h4l10-10-4-4L4 16v4z"/><path d="M13.5 6.5l4 4"/></svg></button>`}</td>
         <td data-l="Typ"><span class="chip">${esc(s.type)}</span></td>
         <td data-l="Franchises" class="cell-wrap">${sfr(s).length?sfr(s).map(n=>`<span class="chip">${esc(n)}</span>`).join(' '):'<span class="count">alle Produkte</span>'}
           <button class="btn ghost sm" data-fedit="${esc(s.id)}" style="margin-left:4px">${news.fedit===s.id?'fertig':'ändern'}</button></td>
@@ -1478,7 +1485,7 @@ function viewNews(){
         <td><button class="btn ghost sm" data-soff="${esc(s.id)}">${s.off?'Fortsetzen':'Pausieren'}</button>
             <button class="btn ghost sm" data-sdel="${esc(s.id)}">Löschen</button></td>
       </tr>${news.fedit===s.id?`<tr><td colspan="5" style="background:var(--surface-2);white-space:normal">
-        <div class="cap" style="margin-bottom:6px">Bei <b>${esc(s.name)}</b> melden für (nichts angehakt = alle Produkte; eine Änderung liest die Quelle still neu ein, ohne Meldungs-Flut):</div>
+        <div class="cap" style="margin-bottom:6px">Bei <b>${esc(s.name)}</b> melden für – <b>Alle Produkte</b> oder einzelne Franchises (eine Änderung liest die Quelle still neu ein, ohne Meldungs-Flut):</div>
         <div class="frwrap">${frChips(sfr(s),'data-fs')}</div></td></tr>`:''}`).join('')}</tbody></table></div>`:''}
   </div>`:''}
   <div class="toolbar">
@@ -1520,8 +1527,11 @@ function wireNews(){
   $$('[data-ww]').forEach(b=>b.onclick=()=>watchWhole(Number(b.dataset.ww)));
   $$('[data-wdel]').forEach(b=>b.onclick=()=>loadNews('/sources/'+b.dataset.wdel,'DELETE'));
   const u=$('#nUrls'); if(u)u.oninput=()=>{news.urls=u.value;};
-  $$('[data-fa]').forEach(b=>b.onclick=()=>{ const n=b.dataset.fa; news.addFr=news.addFr.includes(n)?news.addFr.filter(x=>x!==n):[...news.addFr,n]; const u=$('#nUrls'); if(u)news.urls=u.value; draw(); });
-  $$('[data-fs]').forEach(b=>b.onclick=()=>{ const s=news.data.sources.find(x=>x.id===news.fedit); const n=b.dataset.fs, fr=sfr(s); saveSourceFr(s.id,fr.includes(n)?fr.filter(x=>x!==n):[...fr,n]); });
+  $$('[data-fa]').forEach(b=>b.onclick=()=>{ const n=b.dataset.fa;
+    news.addFr=n==='*'?[]:(news.addFr.includes(n)?news.addFr.filter(x=>x!==n):[...news.addFr,n]);
+    const u=$('#nUrls'); if(u)news.urls=u.value; draw(); });
+  $$('[data-fs]').forEach(b=>b.onclick=()=>{ const s=news.data.sources.find(x=>x.id===news.fedit); const n=b.dataset.fs, fr=sfr(s);
+    saveSourceFr(s.id,n==='*'?[]:(fr.includes(n)?fr.filter(x=>x!==n):[...fr,n])); });
   $$('[data-fedit]').forEach(b=>b.onclick=()=>{ news.fedit=news.fedit===b.dataset.fedit?null:b.dataset.fedit; draw(); });
   $$('[data-sren]').forEach(b=>b.onclick=()=>{ news.ren=b.dataset.sren; draw();
     const el=$('#srenIn'); if(el){ el.focus(); el.select(); } });

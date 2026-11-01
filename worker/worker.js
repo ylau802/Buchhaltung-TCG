@@ -173,7 +173,13 @@ async function readState(env) {
 
 // Alle Adapter liefern [{ id, t, p, a, u, i, g }]: Titel, Preis, verfügbar (0/1), Link, Bild, Franchise.
 async function getJson(url, init) {
-  const res = await fetch(url, Object.assign({ headers: { 'User-Agent': WATCH_UA, Accept: 'application/json' } }, init || {}));
+  const opt = Object.assign({ headers: { 'User-Agent': WATCH_UA, Accept: 'application/json' } }, init || {});
+  let res = await fetch(url, opt);
+  if (res.status === 429) {           // gedrosselt: einmal kurz warten und erneut versuchen
+    const ra = Number(res.headers.get('Retry-After'));
+    await new Promise((r) => setTimeout(r, Math.min(ra > 0 ? ra * 1000 : 2000, 5000)));
+    res = await fetch(url, opt);
+  }
   if (!res.ok) throw new Error(new URL(url).host + ': HTTP ' + res.status);
   const text = await res.text();
   let data;
@@ -596,12 +602,22 @@ async function runWatch(env) {
   }
 
   // Höchstens 4 gleichzeitig: Shopify & Co. drosseln (HTTP 429), wenn eine IP viele Shops auf einmal abfragt.
+  // Dabei pro Host nur eine Anfrage zur Zeit – mehrere Kollektionen desselben Shops liefen sonst
+  // parallel gegen denselben Server und genau das quittiert er mit 429.
+  const byHost = new Map();
+  for (const s of batch) {
+    const h = new URL(s.url).hostname;
+    if (!byHost.has(h)) byHost.set(h, []);
+    byHost.get(h).push(s);
+  }
+  const queues = [...byHost.values()];
   const results = [];
   let next = 0;
-  await Promise.all(Array.from({ length: Math.min(4, batch.length) }, async () => {
-    while (next < batch.length) {
-      const s = batch[next++];
-      try { results.push({ s, r: await fetchSource(s) }); } catch (e) { results.push({ s, err: e.message }); }
+  await Promise.all(Array.from({ length: Math.min(4, queues.length) }, async () => {
+    while (next < queues.length) {
+      for (const s of queues[next++]) {
+        try { results.push({ s, r: await fetchSource(s) }); } catch (e) { results.push({ s, err: e.message }); }
+      }
     }
   }));
 
