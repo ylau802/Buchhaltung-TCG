@@ -692,6 +692,23 @@ async function syncPush(force){
 }
 
 function rows(L){ return (store[L]||[]).map(r=>({...r,_ym:YM(r.d)})); }
+// Läden, die wie eine Internetadresse aussehen („Tutti.ch“), werden klein geschrieben –
+// Domains sind nicht gross, und sonst steht derselbe Shop zweimal im Filter.
+const isWebShop=s=>/\.[a-z]{2,6}$/i.test(String(s||'').trim());
+const normShop=s=>{ const v=String(s||'').trim(); return isWebShop(v)?v.toLowerCase():v; };
+const BUY_LEDGERS=['wareneingang','laufende_kosten'];   // Käufe; Verkäufe bleiben wie eingetragen
+function lowerWebShops(){
+  const seen={}; let n=0;
+  for(const L of BUY_LEDGERS) for(const r of store[L]){
+    const v=String(r.shop||'').trim(), nv=normShop(v);
+    if(nv&&nv!==v){ const k=v+' → '+nv; seen[k]=(seen[k]||0)+1; n++; }
+  }
+  if(!n){ toast('Alle Webshop-Namen sind schon klein geschrieben'); return; }
+  const list=Object.entries(seen).map(([k,c])=>`${k}   (${c}×)`).join('\n');
+  if(!confirm(`${n} Eintr${n===1?'ag':'äge'} in Eingängen und laufenden Kosten anpassen?\n\n${list}`)) return;
+  for(const L of BUY_LEDGERS) for(const r of store[L]){ const nv=normShop(r.shop); if(nv!==r.shop) r.shop=nv; }
+  persist(); draw(); toast(n+(n===1?' Eintrag':' Einträge')+' angepasst');
+}
 async function saveRow(L,row){
   const list=store[L], clean={...row}; delete clean._ym;
   const i=list.findIndex(r=>r.id===clean.id);
@@ -962,6 +979,7 @@ function viewOverview(){
       ${SYNC?`<button class="btn ghost sm" id="dPull"><svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 10-2.3 5.7M20 4v7h-7"/></svg>Aus Cloud neu laden</button>`:''}
       <button class="btn ghost sm" id="dBackup"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>Verschlüsseltes Backup</button>
       <button class="btn ghost sm" id="dImport"><svg viewBox="0 0 24 24"><path d="M12 15V3M7 8l5-5 5 5M5 21h14"/></svg>Backup / Datei einspielen</button>
+      <button class="btn ghost sm" id="dLower" title="Läden wie „Tutti.ch“ in Eingängen und laufenden Kosten klein schreiben">Webshop-Namen klein schreiben</button>
       <button class="btn ghost sm" id="dJson">JSON-Export (offen)</button>
       <button class="btn ghost sm" id="dPass">Passphrase ändern</button>
       <div class="spacer"></div>
@@ -1614,7 +1632,7 @@ function wire(){
   const ex=$('#exportBtn'); if(ex)ex.onclick=exportCSV;
   const bind=(id,fn)=>{ const el=$('#'+id); if(el)el.onclick=fn; };
   bind('dBackup',exportVault); bind('dImport',importData); bind('dJson',exportJSON);
-  bind('dPass',changePass); bind('dReset',resetDevice);
+  bind('dPass',changePass); bind('dReset',resetDevice); bind('dLower',lowerWebShops);
   bind('dPull',async()=>{ toast('Lade aus der Cloud…'); syncRev=0; await syncPull(false);
     if(syncState==='ok') toast('Aktueller Stand geladen'); draw(); });
   bind('dBundle',loadFromBundle);
@@ -1878,6 +1896,7 @@ async function submitForm(){
     rec[k]=v;
   }
   if(!rec.d){ toast('Bitte Datum angeben'); return; }
+  if(BUY_LEDGERS.includes(L)) rec.shop=normShop(rec.shop);   // tutti.ch statt Tutti.ch
   // auto net/gross if empty
   if(L==='warenausgang'&&!num(fd.get('net')))rec.net=+(num(rec.price)+num(rec.cust)-num(rec.fees)-num(rec.porto)).toFixed(2);
   if(L==='wareneingang'&&!num(fd.get('gross')))rec.gross=+((num(rec.qty)||1)*num(rec.ek)+num(rec.ship)).toFixed(2);
