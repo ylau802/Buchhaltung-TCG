@@ -463,7 +463,7 @@ async function getVapid(env) {
 }
 async function vapidHeader(endpoint, v) {
   const head = b64u(te.encode(JSON.stringify({ typ: 'JWT', alg: 'ES256' })));
-  const claims = b64u(te.encode(JSON.stringify({ aud: new URL(endpoint).origin, exp: Math.floor(Date.now() / 1000) + 12 * 3600, sub: 'https://yingsiulau.github.io/yingway/' })));
+  const claims = b64u(te.encode(JSON.stringify({ aud: new URL(endpoint).origin, exp: Math.floor(Date.now() / 1000) + 12 * 3600, sub: 'https://ylau802.github.io/Buchhaltung-TCG/' })));
   const key = await crypto.subtle.importKey('jwk', v.priv, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);
   const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, key, te.encode(head + '.' + claims));
   return 'vapid t=' + head + '.' + claims + '.' + b64u(sig) + ', k=' + v.pub;
