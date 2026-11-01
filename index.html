@@ -311,6 +311,38 @@ thead th:first-child,thead th:last-child{z-index:4}
   .toolbar{gap:7px}
   input[type=search]{min-width:0;flex:1}
 }
+.fr-in{width:210px}
+.fr-in-kw{width:230px}
+
+/* ---------- Handy: aus jeder Tabellenzeile wird eine Karte ----------
+   Acht bis zwölf Spalten lassen sich auf 375 px nicht lesen; waagrecht scrollen
+   versteckt ausgerechnet das Wichtige (Betrag, Ereignis, Aktionen). Deshalb
+   untereinander, mit dem Spaltennamen als Label davor (data-l aus rowHTML). */
+@media (max-width:640px){
+  .tbl-wrap{background:none;border:0;border-radius:0;overflow:visible}
+  .tbl-wrap>table{display:block;font-size:13px}
+  .tbl-wrap thead,.tbl-wrap tfoot{display:none}
+  .tbl-wrap tbody{display:block}
+  .tbl-wrap tbody tr{display:block;background:var(--surface);border:1px solid var(--line);
+    border-radius:12px;padding:8px 13px;margin-bottom:10px}
+  .tbl-wrap tbody tr:hover{background:var(--surface)}
+  .tbl-wrap tbody td{display:flex;gap:14px;align-items:baseline;justify-content:space-between;
+    padding:5px 0;border:0;white-space:normal;text-align:left;
+    position:static;background:none;box-shadow:none}
+  .tbl-wrap tbody td::before{content:attr(data-l);flex:none;color:var(--muted);
+    font-size:10.5px;letter-spacing:.07em;text-transform:uppercase}
+  .tbl-wrap tbody td.e{display:none}
+  .tbl-wrap tbody td.cell-wrap{display:block;max-width:none}
+  .tbl-wrap tbody td.cell-wrap::before{display:block;margin-bottom:4px}
+  .tbl-wrap tbody td:not([data-l]){justify-content:flex-end;margin-top:6px;padding-top:9px;
+    border-top:1px solid var(--line-soft)}
+  .tbl-wrap .pager{justify-content:center;padding:4px 0 0}
+  .rowact{opacity:1}
+  .fg2{grid-template-columns:1fr}
+  .fr-in,.fr-in-kw{width:100%}
+}
+/* Finger statt Maus: ohne Hover waeren die Zeilen-Aktionen unsichtbar */
+@media (hover:none){ .rowact{opacity:1} }
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
 
 /* ---------- lock screen ---------- */
@@ -1085,16 +1117,18 @@ function catBreakdown(f){
     <span class="track"><span class="fill" style="width:${v/max*100}%"></span></span></div>`).join('');
 }
 function rowHTML(L,r,cols){
+  // data-l: auf dem Handy wird jede Zeile eine Karte, dort steht das Label vor dem Wert.
+  // Klasse "e" = leeres Feld, auf dem Handy ausgeblendet statt als „—“ gezeigt.
   return `<tr>${cols.map(([k,lbl,t])=>{
     let v=r[k];
-    if(k==='d')return `<td class="mono">${DDE(v)}</td>`;
-    if(k==='cat')return `<td><span class="chip ${r.cat==='Pokémon'?'c-pk':''}">${esc(v||'—')}</span></td>`;
-    if(k==='sku')return `<td class="mono">${esc(v||'—')}</td>`;
+    const a=`data-l="${esc(lbl)}"`, e=v?'':' e';
+    if(k==='d')return `<td ${a} class="mono">${DDE(v)}</td>`;
+    if(k==='cat')return `<td ${a} class="${e.trim()}"><span class="chip ${r.cat==='Pokémon'?'c-pk':''}">${esc(v||'—')}</span></td>`;
+    if(k==='sku')return `<td ${a} class="mono${e}">${esc(v||'—')}</td>`;
     if(t==='n'){ const nn=num(v);
-      const money=['ek','ship','gross','price','cust','fees','porto','net','total'].includes(k);
-      return `<td class="num">${k==='qty'?N0(nn):(nn?N2(nn):'—')}</td>`; }
-    if(t==='w')return `<td class="cell-wrap">${esc(v||'—')}</td>`;
-    return `<td>${esc(v||'—')}</td>`;
+      return `<td ${a} class="num${nn?'':' e'}">${k==='qty'?N0(nn):(nn?N2(nn):'—')}</td>`; }
+    if(t==='w')return `<td ${a} class="cell-wrap${e}">${esc(v||'—')}</td>`;
+    return `<td ${a} class="${e.trim()}">${esc(v||'—')}</td>`;
   }).join('')}
   <td><div class="rowact">
     ${r.pdf?`<button data-pdf title="Beleg ansehen · ${esc(r.pdf.name)}"><svg viewBox="0 0 24 24"><path d="M6 2h9l5 5v15H6z"/><path d="M15 2v5h5"/></svg></button>`:''}
@@ -1149,17 +1183,17 @@ function viewLager(){
     <thead><tr>${LCOLS.map(([k,l,t])=>`<th class="${t==='n'?'n':''}" data-sk="${k}" ${sk===k?`aria-sort="${dir>0?'ascending':'descending'}"`:''}>${l}<span class="ar">${sk===k?(dir>0?'↑':'↓'):'↕'}</span></th>`).join('')}</tr></thead>
     <tbody>
       ${f.map(o=>`<tr>
-        <td class="mono">${esc(o.sku)}</td>
-        <td><span class="chip ${o.cat==='Pokémon'?'c-pk':''}">${esc(o.cat||'—')}</span></td>
-        <td>${esc(o.form||'—')}</td>
-        <td class="num">${N0(o.buyQty)}</td>
-        <td class="num">${N0(o.sellQty)}</td>
-        <td class="num" style="${o.stock<0?'color:var(--neg)':''}">${N0(o.stock)}</td>
-        <td class="num">${N2(o.unit)}</td>
-        <td class="num">${o.stockVal>0?CHF(o.stockVal):'—'}</td>
-        <td class="num">${o.net?CHF(o.net):'—'}</td>
-        <td class="num ${o.margin>=0?'pos':'neg'}">${o.sellQty?CHF(o.margin):'—'}</td>
-        <td class="num ${o.margin>=0?'pos':'neg'}">${o.sellQty&&o.net?PCT(o.marginPct):'—'}</td>
+        <td data-l="SKU" class="mono">${esc(o.sku)}</td>
+        <td data-l="Kategorie"><span class="chip ${o.cat==='Pokémon'?'c-pk':''}">${esc(o.cat||'—')}</span></td>
+        <td data-l="Artikelform" class="${o.form?'':'e'}">${esc(o.form||'—')}</td>
+        <td data-l="Eingekauft" class="num">${N0(o.buyQty)}</td>
+        <td data-l="Verkauft" class="num">${N0(o.sellQty)}</td>
+        <td data-l="Bestand" class="num" style="${o.stock<0?'color:var(--neg)':''}">${N0(o.stock)}</td>
+        <td data-l="Ø EK/Stk" class="num">${N2(o.unit)}</td>
+        <td data-l="Warenwert" class="num${o.stockVal>0?'':' e'}">${o.stockVal>0?CHF(o.stockVal):'—'}</td>
+        <td data-l="Nettoeinnahmen" class="num${o.net?'':' e'}">${o.net?CHF(o.net):'—'}</td>
+        <td data-l="Marge" class="num ${o.margin>=0?'pos':'neg'}${o.sellQty?'':' e'}">${o.sellQty?CHF(o.margin):'—'}</td>
+        <td data-l="Marge %" class="num ${o.margin>=0?'pos':'neg'}${o.sellQty&&o.net?'':' e'}">${o.sellQty&&o.net?PCT(o.marginPct):'—'}</td>
       </tr>`).join('')||`<tr><td colspan="11"><div class="empty"><h3>Keine Positionen</h3></div></td></tr>`}
     </tbody>
     <tfoot><tr><td>Summe (${f.length})</td><td></td><td></td>
@@ -1407,8 +1441,8 @@ function viewNews(){
     <div style="margin-top:10px"><div class="cap" style="margin-bottom:6px">Melden bei diesen Franchises (nichts angehakt = <b>alle</b> Produkte der Quelle):</div>
       <div class="frwrap">${frChips(news.addFr,'data-fa')}</div></div>
     <div class="toolbar" style="margin:10px 0 0">
-      <input type="text" id="cfName" placeholder="Eigenes Franchise, z. B. Marvel" value="${esc(news.cfName)}" style="width:210px">
-      <input type="text" id="cfKw" placeholder="Stichwörter, mit Komma (optional)" value="${esc(news.cfKw)}" style="width:230px">
+      <input type="text" id="cfName" class="fr-in" placeholder="Eigenes Franchise, z. B. Marvel" value="${esc(news.cfName)}">
+      <input type="text" id="cfKw" class="fr-in fr-in-kw" placeholder="Stichwörter, mit Komma (optional)" value="${esc(news.cfKw)}">
       <button class="btn ghost sm" id="cfAdd">Franchise hinzufügen</button>
       ${(d.custom||[]).map(c=>`<span class="chip">${esc(c.name)} <a href="#" data-cfdel="${esc(c.name)}" title="entfernen" style="color:var(--muted);text-decoration:none">×</a></span>`).join('')}
     </div>
@@ -1418,11 +1452,11 @@ function viewNews(){
     ${S.length?`<div class="tbl-wrap" style="margin-top:14px"><table>
       <thead><tr><th>Quelle</th><th>Typ</th><th>Franchises</th><th>Status</th><th></th></tr></thead>
       <tbody>${S.map(s=>`<tr>
-        <td><a href="${esc(s.url)}" target="_blank" rel="noopener" style="color:var(--ink);font-weight:500;text-decoration:none">${esc(s.name)}</a></td>
-        <td><span class="chip">${esc(s.type)}</span></td>
-        <td class="cell-wrap">${sfr(s).length?sfr(s).map(n=>`<span class="chip">${esc(n)}</span>`).join(' '):'<span class="count">alle Produkte</span>'}
+        <td data-l=""><a href="${esc(s.url)}" target="_blank" rel="noopener" style="color:var(--ink);font-weight:500;text-decoration:none">${esc(s.name)}</a></td>
+        <td data-l="Typ"><span class="chip">${esc(s.type)}</span></td>
+        <td data-l="Franchises" class="cell-wrap">${sfr(s).length?sfr(s).map(n=>`<span class="chip">${esc(n)}</span>`).join(' '):'<span class="count">alle Produkte</span>'}
           <button class="btn ghost sm" data-fedit="${esc(s.id)}" style="margin-left:4px">${news.fedit===s.id?'fertig':'ändern'}</button></td>
-        <td class="cell-wrap">${srcStatus(s)}</td>
+        <td data-l="Status" class="cell-wrap">${srcStatus(s)}</td>
         <td><button class="btn ghost sm" data-soff="${esc(s.id)}">${s.off?'Fortsetzen':'Pausieren'}</button>
             <button class="btn ghost sm" data-sdel="${esc(s.id)}">Löschen</button></td>
       </tr>${news.fedit===s.id?`<tr><td colspan="5" style="background:var(--surface-2);white-space:normal">
@@ -1440,14 +1474,14 @@ function viewNews(){
   ${d?`<div class="tbl-wrap"><table>
     <thead><tr><th>Produkt</th><th>Ereignis</th><th class="n">Preis</th><th>Status</th><th>Wann</th><th></th></tr></thead>
     <tbody>${f.map(e=>`<tr>
-      <td class="cell-wrap" style="min-width:260px"><div style="display:flex;align-items:center;gap:10px">
+      <td class="cell-wrap" data-l="" style="min-width:260px"><div style="display:flex;align-items:center;gap:10px">
         ${e.i?`<img src="${esc(e.i)}" alt="" loading="lazy" style="width:36px;height:36px;object-fit:contain;border-radius:6px;flex:none;background:#fff;padding:2px">`:''}
         <div><a href="${esc(e.u)}" target="_blank" rel="noopener" style="color:var(--ink);font-weight:500;text-decoration:none">${esc(e.t)}</a>
           <div style="margin-top:2px"><span class="chip">${esc(e.s)}</span>${e.g?` <span class="chip ${e.g==='Pokémon'?'c-pk':''}">${esc(e.g)}</span>`:''}</div></div></div></td>
-      <td><span class="chip ${e.k==='new'?'c-pk':''}">${NEWS_KIND[e.k]}</span></td>
-      <td class="num">${price(e)}</td>
-      <td><span class="tag-dot" style="background:${e.a?'var(--pos)':'var(--faint)'}"></span>${e.a?'verfügbar':'ausverkauft'}</td>
-      <td>${esc(ago(e.at))}</td>
+      <td data-l="Ereignis"><span class="chip ${e.k==='new'?'c-pk':''}">${NEWS_KIND[e.k]}</span></td>
+      <td data-l="Preis" class="num"><span>${price(e)}</span></td>
+      <td data-l="Status"><span><span class="tag-dot" style="background:${e.a?'var(--pos)':'var(--faint)'}"></span>${e.a?'verfügbar':'ausverkauft'}</span></td>
+      <td data-l="Wann">${esc(ago(e.at))}</td>
       <td><a class="btn ghost sm" href="${esc(e.u)}" target="_blank" rel="noopener">Öffnen ↗</a></td>
     </tr>`).join('')||`<tr><td colspan="6"><div class="empty">${(d.events||[]).length?'Keine Treffer.':'Noch keine Ereignisse – die erste Prüfung merkt sich nur den aktuellen Stand, ab dann wird Neues hier gelistet.'}</div></td></tr>`}</tbody>
   </table></div>
