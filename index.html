@@ -436,10 +436,11 @@ img{max-width:100%}
       <input type="password" id="pass2" placeholder="Passphrase wiederholen" autocomplete="off"
         autocapitalize="none" autocorrect="off" spellcheck="false" hidden>
       <label class="showpw"><input type="checkbox" id="showPw"> Passphrase anzeigen</label>
+      <label class="showpw"><input type="checkbox" id="stayIn"> Auf diesem Gerät angemeldet bleiben</label>
       <div class="err" id="lockErr"></div>
       <button class="btn" type="submit" id="lockBtn">Entsperren</button>
     </form>
-    <div class="hint" id="lockHint">Die Daten sind AES-256-GCM-verschlüsselt und werden nur hier im Browser entschlüsselt. Die Passphrase wird nirgends gespeichert oder übertragen – ohne sie gibt es keine Wiederherstellung.</div>
+    <div class="hint" id="lockHint">Die Daten sind AES-256-GCM-verschlüsselt und werden nur hier im Browser entschlüsselt. Die Passphrase wird nirgends übertragen – ohne sie gibt es keine Wiederherstellung. Mit „angemeldet bleiben“ liegt sie in diesem Browser, bis du oben rechts auf <b>Sperren</b> tippst; wer das Gerät entsperrt hat, kommt dann ohne Eingabe an die Buchhaltung.</div>
     <button class="linklike" id="lockReset" hidden>Lokale Kopie dieses Geräts löschen</button>
     <div class="hint" id="buildTag" style="margin-top:10px;opacity:.5"></div>
   </div>
@@ -480,6 +481,12 @@ let period='all';
 
 const VKEY='yingway.vault.v1';
 const RKEY='yingway.rev.v1';
+// „Angemeldet bleiben“: die Passphrase liegt dann im Klartext in diesem Browser.
+// Wer das Gerät entsperrt hat, kommt damit an die Buchhaltung und auch an die Cloud.
+// „Sperren“ oben rechts loescht sie wieder.
+const PKEY='yingway.pass.v1';
+const remGet=()=>lsGet(PKEY);
+function remSet(p){ if(p) lsSet(PKEY,p); else try{ localStorage.removeItem(PKEY); }catch(e){} }
 const SYNC=(typeof window.__SYNC_URL__==='string'?window.__SYNC_URL__:'').trim();
 const FILES_BASE=SYNC?SYNC.replace(/\/vault\/?$/,'/files'):'';
 const NEWS_BASE=SYNC?SYNC.replace(/\/vault\/?$/,'/news'):'';
@@ -2066,6 +2073,7 @@ async function changePass(){
   session={key:await deriveKey(p1,salt),salt,pass:p1};
   await persistNow();
   if(SYNC){ syncTok=await sha256hex('yingway|'+p1); syncRev=0; await syncPush(true); }
+  if(remGet()) remSet(p1);   // Geraet bleibt angemeldet, jetzt mit der neuen Passphrase
   toast('Passphrase geändert');
 }
 function resetDevice(){
@@ -2177,7 +2185,7 @@ function showApp(){
   }
 }
 
-function wipeLocal(){ try{ localStorage.removeItem(VKEY); localStorage.removeItem(RKEY); }catch(e){} }
+function wipeLocal(){ try{ localStorage.removeItem(VKEY); localStorage.removeItem(RKEY); }catch(e){} remSet(null); }
 function passphraseMismatch(){
   const L=$('#lock'); if(!L) return;
   L.hidden=false;
@@ -2190,10 +2198,26 @@ function passphraseMismatch(){
   $('#lockForm').onsubmit=e=>{ e.preventDefault(); wipeLocal(); location.reload(); };
 }
 
-(function initLock(){
+(async function initLock(){
   const msg=$('#lockMsg'), hint=$('#lockHint'), p2=$('#pass2'), btn=$('#lockBtn'), err=$('#lockErr');
   const bt=$('#buildTag'); if(bt) bt.textContent='Stand '+BUILD+(SYNC?' · Sync aktiv':' · nur lokal');
   const hasLocal=!!lsGet(VKEY);
+  const stay=$('#stayIn');
+  // Gemerkte Passphrase: gleich versuchen, Sperrbildschirm gar nicht erst zeigen.
+  const saved=remGet();
+  if(saved){
+    stay.checked=true; msg.textContent='Wird entsperrt …'; btn.disabled=true;
+    try{ await attemptEnter(saved); showApp(); return; }
+    catch(ex){
+      btn.disabled=false;
+      if(ex.message==='wrong'){            // woanders geaendert – merken bringt nichts mehr
+        remSet(null); stay.checked=false;
+        msg.textContent='Die gemerkte Passphrase passt nicht mehr. Bitte neu eingeben.';
+      } else {                             // offline o. ae.: gemerkte Passphrase behalten
+        msg.textContent='Passphrase eingeben, um die Buchhaltung zu entschlüsseln.';
+      }
+    }
+  }
   if(freshSetup){
     msg.textContent='Neue Buchhaltung anlegen. Lege eine Passphrase fest – damit werden alle Daten verschlüsselt.';
     p2.hidden=false; btn.textContent='Anlegen';
@@ -2218,6 +2242,7 @@ function passphraseMismatch(){
     try{
       if(freshSetup && v1!==v2) throw new Error('nomatch');
       await attemptEnter(v1);
+      remSet(stay.checked?v1:null);
       showApp();
     }catch(ex){
       err.textContent = ex.message==='wrong' ? (hasLocal
@@ -2231,6 +2256,7 @@ function passphraseMismatch(){
   };
 })();
 
-$('#lockNow').onclick=()=>location.reload();
+// Sperren heisst sperren: eine gemerkte Passphrase wird dabei geloescht.
+$('#lockNow').onclick=()=>{ remSet(null); location.reload(); };
 $('#reloadNow') && ($('#reloadNow').onclick=()=>location.reload());
 </script>
