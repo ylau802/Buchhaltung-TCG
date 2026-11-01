@@ -317,6 +317,12 @@ thead th:first-child,thead th:last-child{z-index:4}
 .srename{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
 .srename input{flex:1;min-width:140px}
 
+/* Quelle hinzufuegen: Adresse und Name untereinander */
+.flab{display:block;font-size:11.5px;text-transform:uppercase;letter-spacing:.07em;
+  color:var(--muted);margin:10px 0 5px}
+.flab:first-of-type{margin-top:0}
+input.wide{width:100%}
+
 .fr-in{width:210px}
 .fr-in-kw{width:230px}
 
@@ -1220,7 +1226,7 @@ function viewLager(){
 }
 
 /* ---------- News (Shop-Monitor, läuft im Worker) ---------- */
-const news={data:null,loading:false,err:'',fr:'',kind:'',src:'',q:'',showSrc:false,showWatch:false,urls:'',addFr:[],fedit:null,ren:null,cfName:'',cfKw:'',msgs:[],auto:false,chat:[],wurls:'',wbusy:false};
+const news={data:null,loading:false,err:'',fr:'',kind:'',src:'',q:'',showSrc:false,showWatch:false,urls:'',addName:'',addNameTouched:false,addFr:[],fedit:null,ren:null,cfName:'',cfKw:'',msgs:[],auto:false,chat:[],wurls:'',wbusy:false};
 const newsCatalog=()=>(news.data&&news.data.catalog)||['Pokémon','One Piece','Dragon Ball'];
 const NEWS_KIND={new:'Neu',price:'Preis',stock:'Wieder verfügbar'};
 // Ereignisse der letzten 24 h
@@ -1248,31 +1254,33 @@ async function loadNews(path,method,body){
   catch(e){ news.err=e.message||'Fehler'; }
   news.loading=false; renderNav(); if(route==='news') draw();
 }
-// Eine Zeile pro Quelle, optional „URL | eigener Name“. Ohne Strich bleiben wie bisher
-// mehrere URLs auf einer Zeile erlaubt.
-function parseSourceLines(text){
-  const out=[];
-  for(const line of String(text).split('\n')){
-    const l=line.trim(); if(!l) continue;
-    const i=l.indexOf('|');
-    if(i<0) l.split(/\s+/).filter(Boolean).forEach(u=>out.push({url:u,name:''}));
-    else { const u=l.slice(0,i).trim(), n=l.slice(i+1).trim(); if(u) out.push({url:u,name:n}); }
-  }
-  return out;
+// Namensvorschlag aus der Adresse: Shop plus Kollektion, lesbar gemacht.
+// „https://cardtreasure.ch/collections/new-arrivals“ -> „Cardtreasure · New Arrivals“
+function nameFromUrl(raw){
+  const s=String(raw).trim(); if(!s) return '';
+  let u; try{ u=new URL(/^https?:\/\//i.test(s)?s:'https://'+s); }catch(e){ return ''; }
+  if(!u.hostname.includes('.')) return '';
+  const words=t=>t.replace(/[-_+]+/g,' ').replace(/\s+/g,' ').trim()
+    .split(' ').map(w=>w.charAt(0).toUpperCase()+w.slice(1)).filter(Boolean);
+  const host=words(u.hostname.replace(/^www\./,'').split('.')[0]).join(' ');
+  const m=u.pathname.match(/\/(?:collections|product-category|produkt-kategorie|categor(?:y|ies))\/([^/]+)/i);
+  let slug='';
+  if(m){ try{ slug=words(decodeURIComponent(m[1])).slice(0,3).join(' '); }catch(e){} }
+  return (slug?host+' · '+slug:host).slice(0,60);
 }
 async function addSources(){
-  const items=parseSourceLines(news.urls);
-  if(!items.length||news.loading) return;
+  const urls=news.urls.split(/\s+/).map(s=>s.trim()).filter(Boolean);
+  if(!urls.length||news.loading) return;
+  // Eigener Name gilt nur, wenn genau eine Adresse drinsteht.
+  const names=urls.length===1?[news.addName.trim()]:urls.map(()=>'');
   news.loading=true; news.msgs=[]; draw();
   try{
-    for(let i=0;i<items.length;i+=8){
-      const part=items.slice(i,i+8);
-      const j=await newsCall('/sources','POST',{urls:part.map(x=>x.url),names:part.map(x=>x.name),fr:news.addFr});
+    for(let i=0;i<urls.length;i+=8){
+      const j=await newsCall('/sources','POST',{urls:urls.slice(i,i+8),names:names.slice(i,i+8),fr:news.addFr});
       news.msgs.push(...j.results);
     }
-    const nameOf=new Map(items.map(x=>[x.url,x.name]));   // Name bei einem Fehlschlag nicht verlieren
-    news.urls=news.msgs.filter(m=>!m.ok&&m.error!=='schon vorhanden')
-      .map(m=>m.url+(nameOf.get(m.url)?' | '+nameOf.get(m.url):'')).join('\n');
+    news.urls=news.msgs.filter(m=>!m.ok&&m.error!=='schon vorhanden').map(m=>m.url).join(' ');
+    if(!news.urls){ news.addName=''; news.addNameTouched=false; }
   }catch(e){ news.err=e.message||'Fehler'; }
   news.loading=false;
   await loadNews('/check','POST'); // neue Quellen sofort einlesen (erster Lauf = nur Stand merken, keine Mail)
@@ -1475,8 +1483,12 @@ function viewNews(){
   </div>`:''}
   ${news.showSrc&&d?`<div class="card">
     <h2>Quellen</h2>
-    <div class="cap">Shops, die geprüft werden. Unterstützt: <b>Shopify</b>- und <b>WooCommerce</b>-Shops (am besten die Kategorie-/Kollektions-URL, z. B. <span class="mono">https://cardtreasure.ch/collections/…</span>) und wog.ch. Pro Quelle wird bei Neuem, Preisänderung und „wieder verfügbar“ gemeldet. Eigener Name gleich mit: <span class="mono">URL | Card Treasure</span> – sonst nimmt die App den Namen des Shops.</div>
-    <textarea id="nUrls" rows="4" placeholder="Eine Shop-URL pro Zeile – optional: URL | eigener Name" style="width:100%;background:var(--surface);border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:8px 10px;font:inherit;font-size:13px">${esc(news.urls)}</textarea>
+    <div class="cap">Shops, die geprüft werden. Unterstützt: <b>Shopify</b>- und <b>WooCommerce</b>-Shops (am besten die Kategorie-/Kollektions-URL, z. B. <span class="mono">https://cardtreasure.ch/collections/…</span>) und wog.ch. Pro Quelle wird bei Neuem, Preisänderung und „wieder verfügbar“ gemeldet. Mehrere auf einmal: URLs mit Leerzeichen trennen – dann zählt nur der Shop-Name.</div>
+    <label class="flab" for="nUrl">Adresse</label>
+    <input type="text" id="nUrl" class="wide" placeholder="https://cardtreasure.ch/collections/…"
+      autocapitalize="none" autocorrect="off" spellcheck="false" enterkeyhint="go" value="${esc(news.urls)}">
+    <label class="flab" for="nName">Name – Vorschlag aus der Adresse, einfach überschreiben</label>
+    <input type="text" id="nName" class="wide" maxlength="60" placeholder="Name der Quelle" value="${esc(news.addName)}">
     <div class="toolbar" style="margin:8px 0 0">
       <button class="btn sm" id="nAdd" ${news.loading?'disabled':''}>Hinzufügen</button>
     </div>
@@ -1548,10 +1560,16 @@ function wireNews(){
   $$('[data-wi]').forEach(b=>b.onchange=()=>{ const [ci,ii]=b.dataset.wi.split(':').map(Number); toggleWatch(ci,ii,b.checked); });
   $$('[data-ww]').forEach(b=>b.onclick=()=>watchWhole(Number(b.dataset.ww)));
   $$('[data-wdel]').forEach(b=>b.onclick=()=>loadNews('/sources/'+b.dataset.wdel,'DELETE'));
-  const u=$('#nUrls'); if(u)u.oninput=()=>{news.urls=u.value;};
+  const u=$('#nUrl'), nm=$('#nName');
+  if(u)u.oninput=()=>{ news.urls=u.value;
+    // Vorschlag mitziehen, solange der Name nicht von Hand angefasst wurde
+    if(!news.addNameTouched){ news.addName=nameFromUrl(u.value); if(nm)nm.value=news.addName; } };
+  if(u)u.onkeydown=e=>{ if(e.key==='Enter'){ e.preventDefault(); addSources(); } };
+  if(nm)nm.oninput=()=>{ news.addName=nm.value; news.addNameTouched=!!nm.value.trim(); };
   $$('[data-fa]').forEach(b=>b.onclick=()=>{ const n=b.dataset.fa;
     news.addFr=n==='*'?[]:(news.addFr.includes(n)?news.addFr.filter(x=>x!==n):[...news.addFr,n]);
-    const u=$('#nUrls'); if(u)news.urls=u.value; draw(); });
+    const u=$('#nUrl'); if(u)news.urls=u.value;            // Eingaben beim Neuzeichnen behalten
+    const nm=$('#nName'); if(nm)news.addName=nm.value; draw(); });
   $$('[data-fs]').forEach(b=>b.onclick=()=>{ const s=news.data.sources.find(x=>x.id===news.fedit); const n=b.dataset.fs, fr=sfr(s);
     saveSourceFr(s.id,n==='*'?[]:(fr.includes(n)?fr.filter(x=>x!==n):[...fr,n])); });
   $$('[data-fedit]').forEach(b=>b.onclick=()=>{ news.fedit=news.fedit===b.dataset.fedit?null:b.dataset.fedit; draw(); });
