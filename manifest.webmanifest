@@ -1,6 +1,6 @@
 {
-  "name": "Yingway Buchhaltung",
-  "short_name": "Yingway",
+  "name": "YL Buchhaltung",
+  "short_name": "YL",
   "description": "TCG-Buchhaltung und News-Monitor",
   "start_url": "./#news",
   "scope": "./",
