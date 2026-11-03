@@ -206,6 +206,8 @@ td.cell-wrap{white-space:normal;min-width:150px;max-width:280px}
 .chip{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;
   background:var(--surface-2);border:1px solid var(--line);color:var(--ink-soft)}
 .chip.c-pk{background:var(--gold-bg);border-color:var(--gold-soft);color:var(--gold)}
+.chip.c-po{background:none;border-style:dashed;border-color:var(--gold-soft);color:var(--gold-soft)}
+tbody tr.po td{color:var(--ink-soft)}
 .rowact{display:flex;gap:4px;opacity:0;transition:opacity .12s}
 tr:hover .rowact{opacity:1}
 .rowact button{border:1px solid var(--line);background:var(--surface);border-radius:6px;
@@ -1056,9 +1058,22 @@ const TITLES={wareneingang:['Eingänge','Wareneinkäufe – was du beschafft has
   laufende_kosten:['Laufende Kosten','Verpackung, Porto, Aufbewahrung, Abos'],
   preorder:['Preorders','Bezahlt, aber noch nicht geliefert – läuft unter den laufenden Kosten und kommt erst bei Lieferung ins Lager']};
 
+// Offene Preorders tauchen zusaetzlich in den laufenden Kosten auf – nicht als
+// zweiter Eintrag, sondern als abgeleitete Zeile. Wird eine Lieferung gebucht,
+// sinkt der Betrag hier automatisch mit; bei voller Lieferung ist die Zeile weg.
+function preorderCostRows(){
+  return rows('preorder').map(r=>({
+    id:r.id, _ym:r._ym, _po:r,
+    d:r.d, cat:'Preorder',
+    desc:[r.sku,r.set].filter(Boolean).join(' · ')||'Vorbestellung',
+    qty:num(r.qty), total:num(r.gross), shop:r.shop||'', receipt:''
+  }));
+}
+function ledgerRows(L){ return L==='laufende_kosten'?rows(L).concat(preorderCostRows()):rows(L); }
+
 function viewLedger(L){
   const [title,sub]=TITLES[L];
-  let data=rows(L);
+  let data=ledgerRows(L);
   const cats=[...new Set(data.map(r=>r.cat).filter(Boolean))].sort();
   const shops=[...new Set(data.map(r=>r.shop).filter(Boolean))].sort();
   const months=[...new Set(data.map(r=>r._ym).filter(Boolean))].sort().reverse();
@@ -1090,9 +1105,10 @@ function viewLedger(L){
   if(L==='wareneingang')totals={gross:sum('gross'),ship:sum('ship'),qty:sum('qty')};
   else if(L==='preorder')totals={gross:sum('gross'),ship:sum('ship'),qty:sum('qty'),got:sum('got')};
   else if(L==='warenausgang')totals={price:sum('price'),net:sum('net'),fees:sum('fees'),porto:sum('porto'),qty:sum('qty')};
-  else totals={total:sum('total')};
+  else totals={total:sum('total'),po:f.filter(r=>r._po).reduce((s,r)=>s+num(r.total),0)};
 
   const cols=COLS[L];
+  const nEdit=f.filter(r=>!r._po).length;   // abgeleitete Preorder-Zeilen sind nicht sammelbearbeitbar
   const catBreak=L==='laufende_kosten'?catBreakdown(f):null;
 
   return `
@@ -1108,14 +1124,14 @@ function viewLedger(L){
     ${shops.length?`<select id="fShop"><option value="">Alle Läden</option>${shops.map(c=>`<option ${state.shop===c?'selected':''}>${esc(c)}</option>`).join('')}</select>`:''}
     ${months.length?`<select id="fMonth"><option value="">Alle Monate</option>${months.map(m=>`<option value="${m}" ${state.month===m?'selected':''}>${monthName(m)}</option>`).join('')}</select>`:''}
     <div class="spacer"></div>
-    ${(state.q||state.cat||state.shop||state.month)?`${f.length?`<button class="btn ghost sm" id="bulkBtn" title="Felder bei allen gefilterten Einträgen gleichzeitig ändern">${f.length} gefilterte bearbeiten…</button>`:''}<button class="btn ghost sm" id="clearF">Filter löschen</button>`:''}
+    ${(state.q||state.cat||state.shop||state.month)?`${nEdit?`<button class="btn ghost sm" id="bulkBtn" title="Felder bei allen gefilterten Einträgen gleichzeitig ändern">${nEdit} gefilterte bearbeiten…</button>`:''}<button class="btn ghost sm" id="clearF">Filter löschen</button>`:''}
     <button class="btn ghost sm" id="exportBtn"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>CSV</button>
   </div>
 
   <div class="count" style="margin-bottom:10px"><b>${f.length}</b> von ${data.length} Einträgen
     ${L==='wareneingang'?`· Einkauf <b>${CHF(totals.gross)}</b>`:''}
     ${L==='warenausgang'?`· Umsatz <b>${CHF(totals.price)}</b> · Netto <b>${CHF(totals.net)}</b>`:''}
-    ${L==='laufende_kosten'?`· Total <b>${CHF(totals.total)}</b>`:''}
+    ${L==='laufende_kosten'?`· Total <b>${CHF(totals.total)}</b>${totals.po?` · davon ${CHF(totals.po)} offene Preorders`:''}`:''}
     ${L==='preorder'?`· offen <b>${CHF(totals.gross)}</b> · ${N0(totals.qty)} Stück ausstehend`:''}
   </div>
 
@@ -1155,11 +1171,11 @@ function catBreakdown(f){
 function rowHTML(L,r,cols){
   // data-l: auf dem Handy wird jede Zeile eine Karte, dort steht das Label vor dem Wert.
   // Klasse "e" = leeres Feld, auf dem Handy ausgeblendet statt als „—“ gezeigt.
-  return `<tr>${cols.map(([k,lbl,t])=>{
+  return `<tr${r._po?' class="po"':''}>${cols.map(([k,lbl,t])=>{
     let v=r[k];
     const a=`data-l="${esc(lbl)}"`, e=v?'':' e';
     if(k==='d')return `<td ${a} class="mono">${DDE(v)}</td>`;
-    if(k==='cat')return `<td ${a} class="${e.trim()}"><span class="chip ${r.cat==='Pokémon'?'c-pk':''}">${esc(v||'—')}</span></td>`;
+    if(k==='cat')return `<td ${a} class="${e.trim()}"><span class="chip ${r.cat==='Pokémon'?'c-pk':''}${r._po?' c-po':''}">${esc(v||'—')}</span></td>`;
     if(k==='sku')return `<td ${a} class="mono${e}">${esc(v||'—')}</td>`;
     if(t==='n'){ const nn=num(v);
       return `<td ${a} class="num${nn?'':' e'}">${(k==='qty'||k==='got')?N0(nn):(nn?N2(nn):'—')}</td>`; }
@@ -1167,7 +1183,7 @@ function rowHTML(L,r,cols){
     return `<td ${a} class="${e.trim()}">${esc(v||'—')}</td>`;
   }).join('')}
   <td><div class="rowact">
-    ${L==='preorder'?`<button data-got title="Lieferung eingetroffen – in die Eingänge buchen"><svg viewBox="0 0 24 24"><path d="M12 3v9m0 0l-4-4m4 4l4-4M4 14v5a2 2 0 002 2h12a2 2 0 002-2v-5"/></svg></button>`:''}
+    ${(L==='preorder'||r._po)?`<button data-got title="Lieferung eingetroffen – in die Eingänge buchen"><svg viewBox="0 0 24 24"><path d="M12 3v9m0 0l-4-4m4 4l4-4M4 14v5a2 2 0 002 2h12a2 2 0 002-2v-5"/></svg></button>`:''}
     ${r.pdf?`<button data-pdf title="Beleg ansehen · ${esc(r.pdf.name)}"><svg viewBox="0 0 24 24"><path d="M6 2h9l5 5v15H6z"/><path d="M15 2v5h5"/></svg></button>`:''}
     <button data-edit title="Bearbeiten"><svg viewBox="0 0 24 24"><path d="M4 20h4l10-10-4-4L4 16v4z"/><path d="M13.5 6.5l4 4"/></svg></button>
     <button data-del title="Löschen"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13"/></svg></button>
@@ -1656,10 +1672,13 @@ function wire(){
     const g=tr.querySelector('[data-got]');
     if(!e)return;
     const idx=[...tr.parentNode.children].indexOf(tr);
-    if(g) g.onclick=()=>{ const r=currentSlice[idx]; if(r)openArrival(r); };
-    e.onclick=()=>{ const r=currentSlice[idx]; if(r)openForm(route,r); };
-    d.onclick=()=>{ const r=currentSlice[idx]; if(r)confirmDel(route,r); };
-    if(p) p.onclick=()=>{ const r=currentSlice[idx]; if(r)viewReceipt(route,r); };
+    // Preorder-Zeilen in den laufenden Kosten sind nur abgeleitet: Bearbeiten,
+    // Löschen und Liefern gehen immer auf den echten Preorder-Eintrag.
+    const src=r=>r._po||r, lg=r=>r._po?'preorder':route;
+    if(g) g.onclick=()=>{ const r=currentSlice[idx]; if(r)openArrival(src(r)); };
+    e.onclick=()=>{ const r=currentSlice[idx]; if(r)openForm(lg(r),src(r)); };
+    d.onclick=()=>{ const r=currentSlice[idx]; if(r)confirmDel(lg(r),src(r)); };
+    if(p) p.onclick=()=>{ const r=currentSlice[idx]; if(r)viewReceipt(lg(r),src(r)); };
   });
 }
 async function viewReceipt(L,r){
@@ -2005,7 +2024,7 @@ const BULK_FIELDS={
   preorder:[['sku','SKU / ID'],['cat','Kategorie'],['form','Artikelform'],['set','Set / Bezeichnung'],['shop','Laden']],
 };
 function openBulk(){
-  const L=route, list=allFiltered(L);
+  const L=route, list=allFiltered(L,true);
   if(!list.length) return;
   editing={L,bulk:true};
   const filt=[state.cat&&`Kategorie „${state.cat}"`,state.shop&&`Laden „${state.shop}"`,
@@ -2244,8 +2263,8 @@ function resetDevice(){
   try{ localStorage.removeItem(VKEY); localStorage.removeItem(RKEY); }catch(e){}
   location.reload();
 }
-function allFiltered(L){
-  let f=rows(L).filter(r=>{
+function allFiltered(L,plain){
+  let f=(plain?rows(L):ledgerRows(L)).filter(r=>{
     if(state.cat&&r.cat!==state.cat)return false;
     if(state.shop&&r.shop!==state.shop)return false;
     if(state.month&&r._ym!==state.month)return false;
