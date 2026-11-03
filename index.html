@@ -83,6 +83,7 @@ nav{padding:12px 12px;display:flex;flex-direction:column;gap:2px;flex:1;overflow
   color:var(--ink-soft);text-decoration:none;font-weight:500;font-size:13.5px;
   border:1px solid transparent;background:none;width:100%;text-align:left}
 .navlink:hover{background:var(--surface-2)}
+.navlink.sub{margin-left:17px;font-size:13px}
 .navlink[aria-current="page"]{background:var(--gold-bg);color:var(--ink);
   border-color:var(--line)}
 .navlink svg{width:17px;height:17px;flex:none;stroke:currentColor;fill:none;
@@ -479,7 +480,7 @@ const num=v=>{ const n=parseFloat(String(v).replace(',','.')); return isFinite(n
 const roundRappen=v=>Math.round(v/0.05)*0.05;   // Schweizer Rundung auf 5 Rappen
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
-const LEDGERS=['wareneingang','warenausgang','laufende_kosten'];
+const LEDGERS=['wareneingang','preorder','warenausgang','laufende_kosten'];
 const KOST_KAT=['Verpackung','Versand','Aufbewahrung','Büromaterial','Paketstation','Abo','Gebühren','Sonstiges'];
 
 let route='overview';
@@ -496,8 +497,8 @@ function remSet(p){ if(p) lsSet(PKEY,p); else try{ localStorage.removeItem(PKEY)
 const SYNC=(typeof window.__SYNC_URL__==='string'?window.__SYNC_URL__:'').trim();
 const FILES_BASE=SYNC?SYNC.replace(/\/vault\/?$/,'/files'):'';
 const NEWS_BASE=SYNC?SYNC.replace(/\/vault\/?$/,'/news'):'';
-const store={wareneingang:[],warenausgang:[],laufende_kosten:[]};
-let ready={wareneingang:false,warenausgang:false,laufende_kosten:false};
+const store={wareneingang:[],preorder:[],warenausgang:[],laufende_kosten:[]};
+let ready={wareneingang:false,preorder:false,warenausgang:false,laufende_kosten:false};
 let session=null;         // {key:CryptoKey, salt:Uint8Array, pass:string}
 let saveTimer=null, pushTimer=null;
 let lastSaved='';
@@ -564,13 +565,12 @@ async function decryptBytes(bytes,pass){
 /* ---------- unlock / persistence ---------- */
 function lsGet(k){ try{return localStorage.getItem(k)}catch(e){return null} }
 function lsSet(k,v){ try{localStorage.setItem(k,v)}catch(e){toast('Speicher nicht verfügbar');} }
-function snapshot(){ return {wareneingang:store.wareneingang,warenausgang:store.warenausgang,
-  laufende_kosten:store.laufende_kosten,_saved:new Date().toISOString()}; }
+function snapshot(){ const o={_saved:new Date().toISOString()};
+  for(const L of LEDGERS) o[L]=store[L];
+  return o; }
+// Ältere Backups kennen „preorder“ noch nicht – fehlende Journale werden einfach leer.
 function loadInto(data){
-  store.wareneingang=Array.isArray(data.wareneingang)?data.wareneingang:[];
-  store.warenausgang=Array.isArray(data.warenausgang)?data.warenausgang:[];
-  store.laufende_kosten=Array.isArray(data.laufende_kosten)?data.laufende_kosten:[];
-  ready={wareneingang:true,warenausgang:true,laufende_kosten:true};
+  for(const L of LEDGERS){ store[L]=Array.isArray(data[L])?data[L]:[]; ready[L]=true; }
 }
 
 /* Zentrale Anmeldung: probiert lokalen Tresor -> Cloud -> Seed -> Neuanlage.
@@ -632,7 +632,7 @@ async function attemptEnter(pass){
   if(pass.length<10) throw new Error('short');
   const salt=crypto.getRandomValues(new Uint8Array(16));
   const key=await deriveKey(pass,salt);
-  loadInto({wareneingang:[],warenausgang:[],laufende_kosten:[]}); session={key,salt,pass};
+  loadInto({}); session={key,salt,pass};
   await persistNow();
   if(SYNC){ syncTok=syncTok||await sha256hex('yingway|'+pass); syncRev=0; await syncPush(true); }
 }
@@ -696,7 +696,7 @@ function rows(L){ return (store[L]||[]).map(r=>({...r,_ym:YM(r.d)})); }
 // Domains sind nicht gross, und sonst steht derselbe Shop zweimal im Filter.
 const isWebShop=s=>/\.[a-z]{2,6}$/i.test(String(s||'').trim());
 const normShop=s=>{ const v=String(s||'').trim(); return isWebShop(v)?v.toLowerCase():v; };
-const BUY_LEDGERS=['wareneingang','laufende_kosten'];   // Käufe; Verkäufe bleiben wie eingetragen
+const BUY_LEDGERS=['wareneingang','preorder','laufende_kosten'];   // Käufe; Verkäufe bleiben wie eingetragen
 async function saveRow(L,row){
   const list=store[L], clean={...row}; delete clean._ym;
   const i=list.findIndex(r=>r.id===clean.id);
@@ -791,20 +791,19 @@ function inPeriod(r){
 const NAV=[
   ['overview','Übersicht','M4 13h4l3 7 4-16 3 9h4'],
   ['wareneingang','Eingänge','M12 5v14M5 12l7 7 7-7'],
+  ['preorder','Preorders','M12 7v5l3 2M21 12a9 9 0 11-18 0 9 9 0 0118 0z',true],
   ['warenausgang','Ausgänge','M12 19V5M5 12l7-7 7 7'],
   ['laufende_kosten','Laufende Kosten','M3 6h18M3 12h18M3 18h12'],
   ['lager','Lager','M3 7l9-4 9 4-9 4-9-4zM3 7v10l9 4 9-4V7'],
   ['news','News','M4 5h13a2 2 0 012 2v12H6a2 2 0 01-2-2V5zM19 9h2v8a2 2 0 01-2 2M8 9h7M8 13h7'],
 ];
 function renderNav(){
-  $('#nav').innerHTML=NAV.map(([id,label,d])=>{
+  $('#nav').innerHTML=NAV.map(([id,label,d,sub])=>{
     let badge='';
-    if(id==='wareneingang')badge=rows('wareneingang').length;
-    if(id==='warenausgang')badge=rows('warenausgang').length;
-    if(id==='laufende_kosten')badge=rows('laufende_kosten').length;
+    if(LEDGERS.includes(id))badge=rows(id).length;
     if(id==='lager')badge=lager().length;
     if(id==='news'&&news.data){ const n=newsFresh().length; badge=n?(n>99?'99+':n):''; }
-    return `<button class="navlink" data-r="${id}" ${route===id?'aria-current="page"':''}>
+    return `<button class="navlink${sub?' sub':''}" data-r="${id}" ${route===id?'aria-current="page"':''}>
       <svg viewBox="0 0 24 24"><path d="${d}"/></svg>${label}
       ${badge!==''?`<span class="badge">${badge}</span>`:''}</button>`;
   }).join('');
@@ -852,11 +851,15 @@ function draw(){
 function agg(){
   const ms=periodMonths();
   const per={}; ms.forEach(m=>per[m]={um:0,ein:0,kos:0});
-  let um=0,ein=0,kos=0;
+  let um=0,ein=0,kos=0,pre=0;
   for(const r of rows('warenausgang')){ const m=r._ym; if(per[m]){per[m].um+=num(r.price);} if(period==='all'||ms.includes(m))um+=num(r.price); }
   for(const r of rows('wareneingang')){ const m=r._ym; if(per[m]){per[m].ein+=num(r.gross);} if(period==='all'||ms.includes(m))ein+=num(r.gross); }
   for(const r of rows('laufende_kosten')){ const m=r._ym; if(per[m]){per[m].kos+=num(r.total);} if(period==='all'||ms.includes(m))kos+=num(r.total); }
-  return {ms,per,um,ein,kos};
+  // Offene Preorders sind bezahlt, aber noch nicht geliefert: sie laufen als Kosten mit
+  // und wandern erst beim Wareneingang in den Wareneinkauf (kein doppelter Abzug).
+  for(const r of rows('preorder')){ const m=r._ym; if(per[m]){per[m].kos+=num(r.gross);}
+    if(period==='all'||ms.includes(m)){kos+=num(r.gross);pre+=num(r.gross);} }
+  return {ms,per,um,ein,kos,pre};
 }
 function viewOverview(){
   const a=agg();
@@ -890,7 +893,7 @@ function viewOverview(){
     <div class="kpi"><span class="lbl">Wareneinkauf</span><span class="v">${CHF(a.ein)}</span>
       <span class="sub">${rows('wareneingang').filter(inPeriod).length} Einkäufe</span></div>
     <div class="kpi"><span class="lbl">Laufende Kosten</span><span class="v">${CHF(a.kos)}</span>
-      <span class="sub">Verpackung, Porto, Abos</span></div>
+      <span class="sub">${a.pre?`davon ${CHF(a.pre)} offene Preorders`:'Verpackung, Porto, Abos'}</span></div>
     <div class="kpi lead"><span class="lbl"><span class="tag" style="background:${saldo>=0?'var(--pos)':'var(--neg)'}"></span>Saldo</span>
       <span class="v ${saldo>=0?'pos':'neg'}">${CHF(saldo)}</span>
       <span class="sub">Umsatz − Einkauf − Kosten</span></div>
@@ -949,6 +952,7 @@ function viewOverview(){
     <div class="cap">PDF-Anhänge deiner Einträge gesammelt als ZIP herunterladen – gefiltert nach Journal und Zeitraum.</div>
     <div class="toolbar" style="margin:0 0 10px">
       <label class="chk"><input type="checkbox" class="recLedger" value="wareneingang" checked>Eingänge</label>
+      <label class="chk"><input type="checkbox" class="recLedger" value="preorder" checked>Preorders</label>
       <label class="chk"><input type="checkbox" class="recLedger" value="warenausgang" checked>Ausgänge</label>
       <label class="chk"><input type="checkbox" class="recLedger" value="laufende_kosten" checked>Laufende Kosten</label>
       <select id="recScope"><option value="all">Gesamter Zeitraum</option>${recScopeOptions()}</select>
@@ -1042,10 +1046,15 @@ const COLS={
   laufende_kosten:[
     ['d','Datum','d'],['cat','Kategorie','s'],['desc','Beschreibung','w'],['qty','Menge','n'],
     ['total','Betrag','n'],['shop','Laden','s'],['receipt','Beleg','s'] ],
+  preorder:[
+    ['d','Bestellt','d'],['sku','SKU','s'],['cat','Kategorie','s'],['form','Artikelform','s'],
+    ['qty','Offen','n'],['got','Geliefert','n'],['ek','EK Netto','n'],['ship','Versand','n'],
+    ['gross','Brutto','n'],['shop','Laden','s'],['person','Person','s'] ],
 };
 const TITLES={wareneingang:['Eingänge','Wareneinkäufe – was du beschafft hast'],
   warenausgang:['Ausgänge','Verkäufe – was rausgegangen ist'],
-  laufende_kosten:['Laufende Kosten','Verpackung, Porto, Aufbewahrung, Abos']};
+  laufende_kosten:['Laufende Kosten','Verpackung, Porto, Aufbewahrung, Abos'],
+  preorder:['Preorders','Bezahlt, aber noch nicht geliefert – läuft unter den laufenden Kosten und kommt erst bei Lieferung ins Lager']};
 
 function viewLedger(L){
   const [title,sub]=TITLES[L];
@@ -1065,7 +1074,7 @@ function viewLedger(L){
   // sort
   const sk=state.sort.k, dir=state.sort.dir;
   f.sort((a,b)=>{ let x=a[sk],y=b[sk];
-    if(typeof x==='number'||['qty','ek','ship','gross','price','cust','fees','porto','net','total'].includes(sk)){x=num(x);y=num(y);}
+    if(typeof x==='number'||['qty','got','ek','ship','gross','price','cust','fees','porto','net','total'].includes(sk)){x=num(x);y=num(y);}
     else{x=String(x||'').toLowerCase();y=String(y||'').toLowerCase();}
     return x<y?-dir:x>y?dir:0; });
 
@@ -1079,6 +1088,7 @@ function viewLedger(L){
   const sum=k=>f.reduce((s,r)=>s+num(r[k]),0);
   let totals;
   if(L==='wareneingang')totals={gross:sum('gross'),ship:sum('ship'),qty:sum('qty')};
+  else if(L==='preorder')totals={gross:sum('gross'),ship:sum('ship'),qty:sum('qty'),got:sum('got')};
   else if(L==='warenausgang')totals={price:sum('price'),net:sum('net'),fees:sum('fees'),porto:sum('porto'),qty:sum('qty')};
   else totals={total:sum('total')};
 
@@ -1106,6 +1116,7 @@ function viewLedger(L){
     ${L==='wareneingang'?`· Einkauf <b>${CHF(totals.gross)}</b>`:''}
     ${L==='warenausgang'?`· Umsatz <b>${CHF(totals.price)}</b> · Netto <b>${CHF(totals.net)}</b>`:''}
     ${L==='laufende_kosten'?`· Total <b>${CHF(totals.total)}</b>`:''}
+    ${L==='preorder'?`· offen <b>${CHF(totals.gross)}</b> · ${N0(totals.qty)} Stück ausstehend`:''}
   </div>
 
   ${catBreak?`<div class="card" style="padding:14px 18px"><div class="bd">${catBreak}</div></div>`:''}
@@ -1122,7 +1133,7 @@ function viewLedger(L){
       ${slice.length?`<tfoot><tr>
         ${cols.map(([k,l,t])=>{
           if(k==='d')return `<td>Summe (${f.length})</td>`;
-          if(t==='n'&&totals[k]!=null)return `<td class="num">${k==='qty'?N0(totals[k]):CHF(totals[k])}</td>`;
+          if(t==='n'&&totals[k]!=null)return `<td class="num">${(k==='qty'||k==='got')?N0(totals[k]):CHF(totals[k])}</td>`;
           return '<td></td>';
         }).join('')}<td></td>
       </tr></tfoot>`:''}
@@ -1151,11 +1162,12 @@ function rowHTML(L,r,cols){
     if(k==='cat')return `<td ${a} class="${e.trim()}"><span class="chip ${r.cat==='Pokémon'?'c-pk':''}">${esc(v||'—')}</span></td>`;
     if(k==='sku')return `<td ${a} class="mono${e}">${esc(v||'—')}</td>`;
     if(t==='n'){ const nn=num(v);
-      return `<td ${a} class="num${nn?'':' e'}">${k==='qty'?N0(nn):(nn?N2(nn):'—')}</td>`; }
+      return `<td ${a} class="num${nn?'':' e'}">${(k==='qty'||k==='got')?N0(nn):(nn?N2(nn):'—')}</td>`; }
     if(t==='w')return `<td ${a} class="cell-wrap${e}">${esc(v||'—')}</td>`;
     return `<td ${a} class="${e.trim()}">${esc(v||'—')}</td>`;
   }).join('')}
   <td><div class="rowact">
+    ${L==='preorder'?`<button data-got title="Lieferung eingetroffen – in die Eingänge buchen"><svg viewBox="0 0 24 24"><path d="M12 3v9m0 0l-4-4m4 4l4-4M4 14v5a2 2 0 002 2h12a2 2 0 002-2v-5"/></svg></button>`:''}
     ${r.pdf?`<button data-pdf title="Beleg ansehen · ${esc(r.pdf.name)}"><svg viewBox="0 0 24 24"><path d="M6 2h9l5 5v15H6z"/><path d="M15 2v5h5"/></svg></button>`:''}
     <button data-edit title="Bearbeiten"><svg viewBox="0 0 24 24"><path d="M4 20h4l10-10-4-4L4 16v4z"/><path d="M13.5 6.5l4 4"/></svg></button>
     <button data-del title="Löschen"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13"/></svg></button>
@@ -1641,8 +1653,10 @@ function wire(){
   });
   $$('#view tbody tr').forEach(tr=>{
     const e=tr.querySelector('[data-edit]'), d=tr.querySelector('[data-del]'), p=tr.querySelector('[data-pdf]');
+    const g=tr.querySelector('[data-got]');
     if(!e)return;
     const idx=[...tr.parentNode.children].indexOf(tr);
+    if(g) g.onclick=()=>{ const r=currentSlice[idx]; if(r)openArrival(r); };
     e.onclick=()=>{ const r=currentSlice[idx]; if(r)openForm(route,r); };
     d.onclick=()=>{ const r=currentSlice[idx]; if(r)confirmDel(route,r); };
     if(p) p.onclick=()=>{ const r=currentSlice[idx]; if(r)viewReceipt(route,r); };
@@ -1678,7 +1692,14 @@ const FORMS={
     ['d','Datum','date'],['cat','Kategorie','datalist:kostcat'],['desc','Beschreibung','text'],
     ['qty','Menge','num'],['total','Gesamtpreis','num'],['shop','Laden','datalist:shop'],
     ['receipt','Beleg-Nummer','text'] ],
+  preorder:[
+    ['d','Bestelldatum','date'],['sku','SKU / ID','datalist:sku'],['cat','Kategorie','datalist:cat'],
+    ['form','Artikelform','datalist:form'],['set','Set / Bezeichnung','text'],
+    ['qty','Menge','num'],['ek','Einkaufspreis netto','num'],['ship','Versandkosten','num'],
+    ['gross','Gesamtpreis brutto','num'],['shop','Laden','datalist:shop'],['person','Person / Verkäufer','text'] ],
 };
+// Journale mit Ware (Menge x Stückpreis + Versand = Brutto) – Preorders rechnen wie Eingänge
+const BUYGOODS=['wareneingang','preorder'];
 let editing=null, pendingFile=null, pendingRemove=false;
 function openForm(L,row){
   editing={L,row,oldYm:row?row._ym:null,id:row?row.id:uid()};
@@ -1687,9 +1708,10 @@ function openForm(L,row){
   $('#panelTitle').textContent=(isNew?'Neuer Eintrag · ':'Bearbeiten · ')+TITLES[L][0];
   const all=rows(L);
   const dl=(field)=>[...new Set(all.map(r=>r[field]).filter(Boolean))].sort();
-  const skuAll=[...new Set([...rows('wareneingang'),...rows('warenausgang')].map(r=>r.sku).filter(Boolean))].sort();
-  const catAll=[...new Set([...rows('wareneingang'),...rows('warenausgang')].map(r=>r.cat).filter(Boolean))].sort();
-  const formAll=[...new Set([...rows('wareneingang'),...rows('warenausgang')].map(r=>r.form).filter(Boolean))].sort();
+  const goods=[...rows('wareneingang'),...rows('preorder'),...rows('warenausgang')];
+  const skuAll=[...new Set(goods.map(r=>r.sku).filter(Boolean))].sort();
+  const catAll=[...new Set(goods.map(r=>r.cat).filter(Boolean))].sort();
+  const formAll=[...new Set(goods.map(r=>r.form).filter(Boolean))].sort();
   const shopAll=[...new Set(LEDGERS.flatMap(x=>rows(x)).map(r=>r.shop).filter(Boolean))].sort();
   // Kostenkategorien: Standardliste + alles, was bereits verwendet wurde – neue Kategorien
   // einfach eintippen, sie erscheinen danach automatisch als Vorschlag
@@ -1727,7 +1749,7 @@ function openForm(L,row){
   // smart autofill from SKU
   const skuIn=form.querySelector('[name=sku]');
   if(skuIn)skuIn.onchange=()=>{
-    const hit=[...rows('warenausgang'),...rows('wareneingang')].filter(r=>r.sku===skuIn.value)
+    const hit=[...rows('warenausgang'),...rows('wareneingang'),...rows('preorder')].filter(r=>r.sku===skuIn.value)
       .sort((a,b)=>(b.d||'').localeCompare(a.d||''))[0];
     if(hit){ ['cat','form','set'].forEach(k=>{ const el=form.querySelector(`[name=${k}]`);
       if(el&&!el.value)el.value=hit[k]||''; }); updateCalc(); }
@@ -1797,7 +1819,7 @@ function openForm(L,row){
         if(feesEl) feesEl.value = priceVal ? roundRappen(priceVal*0.10).toFixed(2) : '';
       }
     }
-    if(L==='wareneingang' && e.target){
+    if(BUYGOODS.includes(L) && e.target){
       if(e.target.name==='gross') bruttoDriven=true;
       if(e.target.name==='ek') bruttoDriven=false;
     }
@@ -1807,7 +1829,7 @@ function openForm(L,row){
   function updateCalc(){
     const g=k=>num(form.querySelector(`[name=${k}]`)?.value);
     const box=$('#calcBox'); if(!box)return;
-    if(L==='wareneingang'){
+    if(BUYGOODS.includes(L)){
       const qty=g('qty')||1, ek=g('ek'), ship=g('ship'), gross=g('gross');
       if(bruttoDriven){
         const ekEl=form.querySelector('[name=ek]');
@@ -1888,7 +1910,7 @@ async function submitForm(){
   if(BUY_LEDGERS.includes(L)) rec.shop=normShop(rec.shop);   // tutti.ch statt Tutti.ch
   // auto net/gross if empty
   if(L==='warenausgang'&&!num(fd.get('net')))rec.net=+(num(rec.price)+num(rec.cust)-num(rec.fees)-num(rec.porto)).toFixed(2);
-  if(L==='wareneingang'&&!num(fd.get('gross')))rec.gross=+((num(rec.qty)||1)*num(rec.ek)+num(rec.ship)).toFixed(2);
+  if(BUYGOODS.includes(L)&&!num(fd.get('gross')))rec.gross=+((num(rec.qty)||1)*num(rec.ek)+num(rec.ship)).toFixed(2);
   delete rec._ym;
   const btn=$('#saveBtn'); btn.textContent='…'; btn.disabled=true;
   try{
@@ -1905,11 +1927,82 @@ async function submitForm(){
     btn.textContent=row?'Speichern':'Anlegen'; btn.disabled=false;
   }
 }
+/* ---------- Preorder: gelieferte Menge in die Eingänge buchen ----------
+   Teillieferungen sind der Normalfall: es wandert nur die eingetroffene Menge
+   in den Wareneingang (und damit ins Lager), der Rest bleibt offen stehen.
+   Versandkosten werden anteilig mitgenommen, die letzte Lieferung bekommt den Rest. */
+function openArrival(row){
+  editing={L:'preorder',row,arrival:true};
+  const offen=num(row.qty), ek=num(row.ek), ship=num(row.ship), got=num(row.got);
+  $('#panelTitle').textContent='Lieferung eingetroffen';
+  $('#panelBody').innerHTML=`<p style="color:var(--ink-soft);margin:0 0 14px">
+      <b>${esc(row.sku||row.set||'Preorder')}</b>${row.set&&row.sku?` · ${esc(row.set)}`:''}<br>
+      <span style="color:var(--muted);font-size:12.5px">bestellt am ${DDE(row.d)}${row.shop?' bei '+esc(row.shop):''}
+      · offen: ${N0(offen)} Stück für ${CHF(num(row.gross))}${got?` · schon geliefert: ${N0(got)}`:''}</span></p>
+    <form id="arrForm">
+      <div class="fg"><label>Lieferdatum</label><input type="date" name="d" value="${today()}"></div>
+      <div class="fg"><label>Gelieferte Menge</label>
+        <input type="text" inputmode="decimal" autocomplete="off" name="qty" value="${offen}">
+        <p class="fghint">Bei einer Teillieferung nur die eingetroffene Menge eintragen – der Rest bleibt als Preorder offen.</p></div>
+      <div class="calc" id="arrCalc"></div>
+    </form>`;
+  $('#panelFoot').innerHTML=`<button class="btn ghost" id="cancelBtn" type="button">Abbrechen</button>
+    <button class="btn" id="arrOk" type="button">In Eingänge buchen</button>`;
+  const form=$('#arrForm');
+  const calc=()=>{
+    const n=Math.min(Math.max(num(form.qty.value),0),offen);
+    const full=n>=offen-1e-9;
+    const sh=full?ship:+(ship*(offen?n/offen:0)).toFixed(2);
+    const box=$('#arrCalc'); if(!box)return;
+    box.innerHTML=`<span>${N0(n)} × ${N2(ek)} + ${N2(sh)} Versand → Eingänge${full?'':` · offen bleiben ${N0(offen-n)}`}</span>
+      <span><b>${CHF(n*ek+sh)}</b></span>`;
+  };
+  form.oninput=calc; calc();
+  $('#cancelBtn').onclick=closeForm;
+  $('#arrOk').onclick=()=>applyArrival(row);
+  openPanel();
+}
+async function applyArrival(row){
+  const fd=new FormData($('#arrForm'));
+  const d=String(fd.get('d')||'').slice(0,10)||today();
+  const offen=num(row.qty), ek=num(row.ek), ship=num(row.ship);
+  let n=num(fd.get('qty'));
+  if(!(n>0)){ toast('Bitte eine gelieferte Menge angeben'); return; }
+  if(n>offen) n=offen;
+  const full=n>=offen-1e-9;
+  const sh=full?ship:+(ship*(offen?n/offen:0)).toFixed(2);
+  const ein={id:uid(),d,sku:row.sku||'',cat:row.cat||'',form:row.form||'',set:row.set||'',
+    qty:n,ek,ship:sh,gross:+(n*ek+sh).toFixed(2),shop:row.shop||'',person:row.person||'',po:row.id};
+  const btn=$('#arrOk'); if(btn){ btn.textContent='…'; btn.disabled=true; }
+  // Beleg (Rechnung der Vorbestellung) wandert bei der letzten Lieferung mit um
+  if(full && row.pdf && FILES_BASE){
+    try{
+      const bytes=await downloadReceipt('preorder',row.id);
+      await uploadReceipt('wareneingang',ein.id,new File([bytes],row.pdf.name,{type:'application/pdf'}));
+      ein.pdf={...row.pdf};
+      await deleteReceipt('preorder',row.id);
+    }catch(e){}
+  }
+  store.wareneingang.push(ein);
+  if(full){
+    store.preorder=store.preorder.filter(r=>r.id!==row.id);
+  }else{
+    const i=store.preorder.findIndex(r=>r.id===row.id);
+    if(i>=0){ const rest=+(offen-n).toFixed(4), restShip=+(ship-sh).toFixed(2);
+      store.preorder[i]={...store.preorder[i],qty:rest,ship:restShip,
+        gross:+(rest*ek+restShip).toFixed(2),got:+(num(row.got)+n).toFixed(4)}; }
+  }
+  persist(); closeForm(); draw();
+  toast(full?'Preorder vollständig geliefert – jetzt in den Eingängen'
+            :`${N0(n)} von ${N0(offen)} gebucht · ${N0(offen-n)} bleiben offen`);
+}
+
 /* ---------- Sammelbearbeitung: Felder bei allen gefilterten Einträgen ändern ---------- */
 const BULK_FIELDS={
   wareneingang:[['sku','SKU / ID'],['cat','Kategorie'],['form','Artikelform'],['set','Set / Bezeichnung'],['shop','Laden']],
   warenausgang:[['sku','SKU / ID'],['cat','Kategorie'],['form','Artikelform'],['set','Set / Bezeichnung'],['shop','Laden / Plattform']],
   laufende_kosten:[['cat','Kategorie'],['shop','Laden']],
+  preorder:[['sku','SKU / ID'],['cat','Kategorie'],['form','Artikelform'],['set','Set / Bezeichnung'],['shop','Laden']],
 };
 function openBulk(){
   const L=route, list=allFiltered(L);
@@ -2041,16 +2134,16 @@ function buildZip(files){
   for(const c of chunks){ out.set(c,p); p+=c.length; }
   return out;
 }
+function allLedgers(){ const o={}; for(const L of LEDGERS) o[L]=store[L];
+  o._exported=new Date().toISOString(); return o; }
 function exportJSON(){
-  const payload={wareneingang:store.wareneingang,warenausgang:store.warenausgang,
-    laufende_kosten:store.laufende_kosten,_exported:new Date().toISOString()};
+  const payload=allLedgers();
   downloadFile(`yingway-buchhaltung_${today()}.json`,JSON.stringify(payload,null,1),'application/json');
   toast('Unverschlüsseltes JSON heruntergeladen');
 }
 async function exportVault(){
   if(!session)return;
-  const payload={wareneingang:store.wareneingang,warenausgang:store.warenausgang,
-    laufende_kosten:store.laufende_kosten,_exported:new Date().toISOString()};
+  const payload=allLedgers();
   const blob=await encryptJSON(payload,session.key,session.salt);
   downloadFile(`yingway-backup_${today()}.vault`,blob,'text/plain');
   toast('Verschlüsseltes Backup heruntergeladen');
@@ -2068,11 +2161,10 @@ function importData(){
       try{ data=(await decryptJSON(text,pass)).data; }
       catch(err){ toast('Konnte Backup nicht entschlüsseln'); return; }
     }
-    if(!data||!['wareneingang','warenausgang','laufende_kosten'].some(k=>Array.isArray(data[k]))){
+    if(!data||!LEDGERS.some(k=>Array.isArray(data[k]))){
       toast('Keine gültige Buchhaltungsdatei'); return; }
     if(!confirm('Alle aktuellen Einträge auf diesem Gerät durch die Datei ersetzen?'))return;
-    store.wareneingang=data.wareneingang||[]; store.warenausgang=data.warenausgang||[];
-    store.laufende_kosten=data.laufende_kosten||[];
+    for(const L of LEDGERS) store[L]=Array.isArray(data[L])?data[L]:[];
     await persistNow(); toast('Daten importiert');
     if(SYNC){ syncRev=0; await syncPush(true); }
     draw();
@@ -2115,7 +2207,7 @@ async function loadFromBundle(){
   let data;
   try{ data=(await decryptJSON(seed,pass)).data; }
   catch(e){ toast('Diese Passphrase passt nicht zum Bundle'); return; }
-  const n=(data.wareneingang||[]).length+(data.warenausgang||[]).length+(data.laufende_kosten||[]).length;
+  const n=LEDGERS.reduce((s,L)=>s+((data[L]||[]).length),0);
   if(!confirm(`Alle Einträge durch die ${n} Einträge aus dem Bundle ersetzen${SYNC?' – auch in der Cloud':''}?`)) return;
   loadInto(data);
   await persistNow();
@@ -2163,7 +2255,7 @@ function allFiltered(L){
   });
   const sk=state.sort.k,dir=state.sort.dir;
   f.sort((a,b)=>{ let x=a[sk],y=b[sk];
-    if(['qty','ek','ship','gross','price','cust','fees','porto','net','total'].includes(sk)){x=num(x);y=num(y);}
+    if(['qty','got','ek','ship','gross','price','cust','fees','porto','net','total'].includes(sk)){x=num(x);y=num(y);}
     else{x=String(x||'').toLowerCase();y=String(y||'').toLowerCase();}
     return x<y?-dir:x>y?dir:0; });
   return f;
