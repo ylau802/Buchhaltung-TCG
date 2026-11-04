@@ -86,7 +86,11 @@ const FAST_HOSTS = ['wog.ch'];
 const CAT_MAX = 500;        // so viele Artikel je Quelle wandern in den Suchkatalog
 const EVENTS_KEEP = 500;
 // Pro Cron-Lauf: Workers-Limit sind 50 Anfragen; das Datenbudget hält die CPU-Zeit klein (Free-Tarif).
-const RUN_SUBREQ = 40;
+// Cloudflare laesst je Lauf 50 Fremdabrufe zu. Davon gehen nicht nur Seiten ab,
+// sondern auch Umleitungen, robots.txt und jede Push-Nachricht (eine je Nachricht
+// und Geraet). Darum bleibt hier Luft, und der Rest wird unten ausgerechnet.
+const SUBREQ_CAP = 50;
+const RUN_SUBREQ = 34;
 const RUN_BYTES = 12000000;  // entpackt; CS-Cart ~1 MB, Shopware ~3 MB je Seite
 
 function corsHeaders(extra) {
@@ -1919,14 +1923,18 @@ async function pushOne(env, subs, v, msg, dead) {
 // Nur wenn auf einen Schlag sehr viele Meldungen kommen, wird der Rest gebündelt:
 // sonst stünden 40 Nachrichten gleichzeitig auf dem Handy und der Worker liefe
 // in das Limit für Fremdabrufe pro Lauf.
-async function sendPush(env, events, test) {
+async function sendPush(env, events, test, budget) {
   const all = await readPush(env);
   const subs = all.slice(0, MAX_PUSH_DEVICES);
   if (!subs.length) return { devices: 0, sent: 0, failed: 0, messages: 0 };
   const v = await getVapid(env);
   const dead = new Set();
-  const single = events.slice(0, MAX_PUSH_EVENTS);
-  const rest = events.slice(MAX_PUSH_EVENTS);
+  // Wie viele Einzelnachrichten noch ins Abruf-Budget passen: eine je Nachricht
+  // und Geraet. Was nicht mehr passt, kommt gebuendelt in einer Nachricht.
+  const room = budget == null ? MAX_PUSH_EVENTS : Math.max(1, Math.floor((budget - 1) / subs.length));
+  const n = Math.max(1, Math.min(MAX_PUSH_EVENTS, room));
+  const single = events.slice(0, n);
+  const rest = events.slice(n);
   const pre = test ? 'Test: ' : '';
   const msgs = single.map((e, i) => ({
     t: clip(pre + KIND_LABEL[e.k] + (e.s ? ' · ' + e.s : '') + (e.l ? ' · ' + e.l : ''), 80),
@@ -2180,7 +2188,11 @@ async function runWatch(env, only, opts) {
   // Ohne angemeldetes Gerät ist das kein Fehler: sendPush meldet dann schlicht null.
   let pushErr = null;
   if (events.length) {
-    try { await sendPush(env, events, false); } catch (e) { pushErr = e.message; }
+    // Was die Seitenabrufe uebrig gelassen haben, steht den Push-Nachrichten zu.
+    // Vier Abrufe bleiben als Reserve fuer Umleitungen und robots.txt.
+    const used = results.reduce((a, x) => a + ((x.r && x.r.pages) || 1), 0);
+    const budget = Math.max(2, SUBREQ_CAP - used - 4);
+    try { await sendPush(env, events, false, budget); } catch (e) { pushErr = e.message; }
   }
   if (!state.cat) state.cat = {};
   for (const [id, next, st, n, cat] of commits) {
