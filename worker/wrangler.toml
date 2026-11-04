@@ -16,9 +16,11 @@ id = "89e6489134074ceaba2d4f0c1b5b3c1e"
 #binding = "FILES"
 #bucket_name = "yingway-files"
 
-# News-Monitor: alle 5 Minuten die nächsten Shops prüfen.
+# News-Monitor: der Cron laeuft jede Minute. Die volle Runde macht der Worker
+# aber nur alle fuenf Minuten; dazwischen kommen nur die Shops der Schnellspur
+# dran (FAST_HOSTS in worker.js, derzeit wog.ch).
 [triggers]
-crons = ["*/5 * * * *"]
+crons = ["* * * * *"]
 
 # Mail-Empfänger und Resend-Key sind Secrets (Repo ist öffentlich):
 #   wrangler secret put NEWS_TO          (kommagetrennt, z. B. bruder@x.ch)

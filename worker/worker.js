@@ -79,6 +79,10 @@ const COOL_MAX = 6 * 60 * 60 * 1000;      // laenger als sechs Stunden warten wi
 const HOST_PAGES = 4;                // so viele Seiten je Shop und Lauf, mehr nicht
 const HOST_PAUSE = 2000;             // Pause zwischen zwei Anfragen an denselben Shop
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Shops, bei denen es auf Minuten ankommt: die werden jede Minute geprueft,
+// alle uebrigen weiterhin alle fuenf. Bei wog.ch ist ein Lauf ein einziger
+// Abruf, das vertraegt der Laden problemlos.
+const FAST_HOSTS = ['wog.ch'];
 const CAT_MAX = 500;        // so viele Artikel je Quelle wandern in den Suchkatalog
 const EVENTS_KEEP = 500;
 // Pro Cron-Lauf: Workers-Limit sind 50 Anfragen; das Datenbudget hält die CPU-Zeit klein (Free-Tarif).
@@ -1996,11 +2000,18 @@ function describe(ev) {
 // only = Liste von Quellen-IDs: dann wird nur die eingelesen. Das braucht die App
 // gleich nach dem Hinzufügen – sonst wartet man dort auf eine ganze Runde über
 // alle Quellen, nur um eine einzige neue zu sehen.
-async function runWatch(env, only) {
+async function runWatch(env, only, opts) {
   const now = new Date().toISOString();
   const cfg = await readCfg(env);
   const state = await readState(env);
   const pick = only && only.length ? new Set(only) : null;
+  // Schnelldurchgang: nur die Shops der Schnellspur, und gespeichert wird nur,
+  // wenn sich wirklich etwas ergeben hat - sonst waeren es 1440 Schreibzugriffe
+  // am Tag statt knapp 300, und das Kontingent ist endlich.
+  const fast = !!(opts && opts.fast);
+  const hostOf = (s) => { try { return new URL(s.url).hostname; } catch (e) { return ''; } };
+  const onFast = (s) => FAST_HOSTS.some((h) => { const x = hostOf(s); return x === h || x.endsWith('.' + h); });
+  const partial = !!pick || fast;
 
   // Einmalig nach dem Preis-Fix: Quellen, deren Preise als Text dastehen, still
   // neu einlesen. Sonst meldete der naechste Lauf die Korrektur (299.95 -> 2299.95)
@@ -2024,7 +2035,7 @@ async function runWatch(env, only) {
     state.fix2 = FIX2;
   }
 
-  const todo = cfg.sources.filter((s) => !s.off && (!pick || pick.has(s.id)))
+  const todo = cfg.sources.filter((s) => !s.off && (!pick || pick.has(s.id)) && (!fast || onFast(s)))
     .sort((a, b) => ((state.src[a.id] || {}).lastCheck || '').localeCompare((state.src[b.id] || {}).lastCheck || ''));
   const batch = [];
   let pagesLeft = RUN_SUBREQ, bytesLeft = RUN_BYTES;
@@ -2090,7 +2101,8 @@ async function runWatch(env, only) {
   }));
 
   const events = [];
-  const commits = []; // [sourceId, nextSnap, st, nEvents]
+  let touched = false;   // gibt es etwas, das gespeichert werden muss?
+  const commits = []; // [sourceId, nextSnap, st, nEvents, cat]
   for (const { s, r, err, full, win } of results) {
     const st = Object.assign({}, state.src[s.id], { lastCheck: now });
     if (err) {
@@ -2111,6 +2123,7 @@ async function runWatch(env, only) {
         st.lastError = new URL(s.url).hostname + ' war kurz nicht erreichbar ('
           + err.replace(/^.*?: /, '') + ') – wird beim nächsten Lauf erneut versucht';
       } else st.lastError = err;
+      if ((state.src[s.id] || {}).lastError !== st.lastError) touched = true;
       state.src[s.id] = st; continue;
     }
     const snap = state.snap[s.id] || {};
@@ -2171,21 +2184,30 @@ async function runWatch(env, only) {
   }
   if (!state.cat) state.cat = {};
   for (const [id, next, st, n, cat] of commits) {
-    if (cat) state.cat[id] = cat;   // auch wenn der Push haengt: der Katalog stimmt
+    if (cat) {
+      // Nur uebernehmen, wenn sich die Liste geaendert hat - sonst gaelte jeder
+      // Lauf allein wegen des Zeitstempels als Aenderung.
+      const old = state.cat[id];
+      if (!old || JSON.stringify(old.l) !== JSON.stringify(cat.l)) { state.cat[id] = cat; touched = true; }
+    }
     if (pushErr && n) { st.lastError = 'Push fehlgeschlagen, neuer Versuch folgt'; state.src[id] = st; continue; }
+    if (JSON.stringify(state.snap[id] || {}) !== JSON.stringify(next)) touched = true;
     state.snap[id] = next; state.src[id] = st;
   }
+  if (events.length || pushErr) touched = true;
   if (!pushErr && events.length) state.events = events.concat(state.events).slice(0, EVENTS_KEEP);
   // Nur bei einer vollen Runde: "letzter Lauf" und das Aufräumen gelöschter Quellen.
   // Eine gezielte Prüfung einzelner Quellen sagt über die übrigen nichts aus.
-  if (!pick) {
+  if (!partial) {
+    touched = true;
     state.lastRun = now;
     state.lastError = pushErr;
     const ids = new Set(cfg.sources.map((s) => s.id));
     for (const k of Object.keys(state.snap)) if (!ids.has(k)) { delete state.snap[k]; delete state.src[k]; }
     for (const k of Object.keys(state.cat || {})) if (!ids.has(k)) delete state.cat[k];
   }
-  await env.DB.put(STATE_KEY, JSON.stringify(state));
+  // Im Schnelldurchgang ohne Befund gar nicht erst schreiben.
+  if (!fast || touched) await env.DB.put(STATE_KEY, JSON.stringify(state));
   return { cfg, state };
 }
 
@@ -2415,6 +2437,10 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
-    if (env.DB) ctx.waitUntil(runWatch(env));
+    if (!env.DB) return;
+    // Der Cron laeuft jede Minute. Die volle Runde bleibt beim Fuenf-Minuten-Takt,
+    // dazwischen kommen nur die Shops der Schnellspur dran.
+    const min = new Date(event && event.scheduledTime ? event.scheduledTime : Date.now()).getUTCMinutes();
+    ctx.waitUntil(min % 5 === 0 ? runWatch(env) : runWatch(env, null, { fast: true }));
   },
 };
