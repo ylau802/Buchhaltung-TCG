@@ -63,6 +63,9 @@ const PAGE_BUDGET = {
   wog: [1, 1],
 };
 const FULL_EVERY = 50 * 60 * 1000;   // voller Durchlauf hoechstens stuendlich
+const COOL_AFTER_BLOCK = 30 * 60 * 1000;  // nach 403/429 so lange nicht wieder anklopfen
+const HOST_PAUSE = 1200;             // Pause zwischen zwei Anfragen an denselben Shop
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const EVENTS_KEEP = 500;
 // Pro Cron-Lauf: Workers-Limit sind 50 Anfragen; das Datenbudget hält die CPU-Zeit klein (Free-Tarif).
 const RUN_SUBREQ = 40;
@@ -410,6 +413,7 @@ async function fetchCs(src, max) {
   const lim = max || CS_MAX_PAGES;
   let url = csClean(src.url), pages = 0, bytes = 0, truncated = false;
   for (let page = 1; page <= lim && url; page++) {
+    if (page > 1) await sleep(HOST_PAUSE);   // je Seite ein Megabyte – nicht am Stueck anfordern
     const { html, bytes: b } = await getHtml(url);
     pages++; bytes += b;
     const list = csItems(html, origin);
@@ -503,6 +507,7 @@ async function fetchSumup(src, max) {
   const lim = max || SU_MAX_PAGES;
   let pages = 0, bytes = 0, truncated = false, more = true;
   for (let page = 1; page <= lim && more; page++) {
+    if (page > 1) await sleep(HOST_PAUSE);
     const { html, bytes: b } = await getHtml(suPageUrl(src.url, page));
     pages++; bytes += b;
     const list = suItems(html);
@@ -958,8 +963,11 @@ async function runWatch(env) {
     .sort((a, b) => ((state.src[a.id] || {}).lastCheck || '').localeCompare((state.src[b.id] || {}).lastCheck || ''));
   const batch = [];
   let pagesLeft = RUN_SUBREQ, bytesLeft = RUN_BYTES;
+  const tNow = Date.parse(now);
   for (const s of todo) {
     const h = state.src[s.id] || {};
+    // Hat der Shop gerade dichtgemacht, erst nach der Ruhepause wieder anklopfen.
+    if (h.cool && tNow < Date.parse(h.cool)) continue;
     const pg = h.pages || 1, by = h.bytes || 300000;
     if (batch.length && (pg > pagesLeft || by > bytesLeft)) continue;
     batch.push(s); pagesLeft -= pg; bytesLeft -= by;
@@ -976,12 +984,19 @@ async function runWatch(env) {
   }
   const queues = [...byHost.values()];
   const results = [];
+  const deep = { n: 0 };
   let next = 0;
   await Promise.all(Array.from({ length: Math.min(4, queues.length) }, async () => {
     while (next < queues.length) {
+      let done = 0;
       for (const s of queues[next++]) {
+        if (done++) await sleep(HOST_PAUSE);   // nicht zwei Quellen desselben Shops am Stueck
         const h0 = state.src[s.id] || {};
-        const full = !h0.lastFull || Date.parse(now) - Date.parse(h0.lastFull) > FULL_EVERY;
+        // Hoechstens eine Quelle je Lauf geht durch die ganze Kategorie. Sonst wollten
+        // nach einem Neustart alle gleichzeitig in die Tiefe und der Shop macht dicht.
+        const due = !h0.lastFull || Date.parse(now) - Date.parse(h0.lastFull) > FULL_EVERY;
+        const full = due && deep.n < 1;
+        if (full) deep.n++;
         const budget = PAGE_BUDGET[s.type] || PAGE_BUDGET.shopify;
         try { results.push({ s, full, r: await fetchSource(s, budget[full ? 1 : 0]) }); }
         catch (e) { results.push({ s, err: e.message }); }
@@ -993,13 +1008,25 @@ async function runWatch(env) {
   const commits = []; // [sourceId, nextSnap, st, nEvents]
   for (const { s, r, err, full } of results) {
     const st = Object.assign({}, state.src[s.id], { lastCheck: now });
-    if (err) { st.lastError = err; state.src[s.id] = st; continue; }
+    if (err) {
+      if (/HTTP (40[13]|429)/.test(err)) {
+        // Der Shop drosselt uns. Nicht weiter anklopfen, sondern eine Weile ruhen –
+        // der zuletzt bekannte Stand der Quelle bleibt unveraendert stehen.
+        st.cool = new Date(Date.parse(now) + COOL_AFTER_BLOCK).toISOString();
+        st.lastError = new URL(s.url).hostname + ' drosselt gerade (' + err.replace(/^.*?: /, '') + ') – nächster Versuch in einer halben Stunde';
+      } else st.lastError = err;
+      state.src[s.id] = st; continue;
+    }
     const d = diff(s, r.list, state.snap[s.id] || {}, !!st.init, now);
     // Ein Schnelldurchlauf liest absichtlich nur die neuesten Seiten – das ist kein Fehler.
     // Gemeldet wird nur, wenn auch der volle Durchlauf nicht bis zum Ende kam.
     Object.assign(st, { lastOk: now, lastError: full && r.truncated ? 'sehr grosse Kategorie – geprüft werden die ' + r.list.length + ' neuesten Artikel' : null,
       count: r.list.length, pages: r.pages, bytes: r.bytes, init: true });
     if (full) st.lastFull = now;
+    // Beim ersten Mal die vollen Durchlaeufe ueber die Stunde verteilen, damit nicht
+    // alle Quellen eines Shops immer im selben Lauf in die Tiefe gehen.
+    else if (!st.lastFull) st.lastFull = new Date(Date.parse(now) - Math.floor(Math.random() * FULL_EVERY)).toISOString();
+    if (st.cool) delete st.cool;
     if (s.item && r.list[0]) st.cur = { p: r.list[0].p, a: r.list[0].a };
     commits.push([s.id, d.next, st, d.events.length]);
     events.push(...d.events);
