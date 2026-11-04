@@ -26,7 +26,7 @@
  *   Vault (siehe oben) lehnt /files jede Anfrage ab.
  *
  * News-Monitor: ein Cron-Trigger (alle 5 Min.) prüft reihum die in der App eingetragenen
- * Shops (Shopify, WooCommerce, ePages, CS-Cart, SumUp und wog.ch), filtert auf Pokémon / One Piece / Dragon Ball,
+ * Shops (Shopify, WooCommerce, Shopware, ePages, CS-Cart, SumUp und wog.ch), filtert auf Pokémon / One Piece / Dragon Ball,
  * vergleicht mit dem letzten Stand und meldet per Mail (Resend-API): neue Produkte,
  * Preisänderungen, ausverkauft -> wieder verfügbar.
  *   GET    /news                -> { sources, events, lastRun, lastError, mail }
@@ -67,14 +67,14 @@ const FULL_EVERY = 50 * 60 * 1000;   // voller Durchlauf hoechstens stuendlich
 // HTTP 403 quittiert hat), steht Seite 1 in jedem Lauf – dort erscheinen neue Artikel –
 // und dazu ein Fenster weiter hinten, das mit jedem Lauf weiterwandert. Nach ein paar
 // Laeufen war die ganze Kategorie dran, ohne je mehr als drei Seiten am Stueck zu holen.
-const WINDOW = { cscart: 1, sumup: 2 };
+const WINDOW = { cscart: 1, sumup: 2, shopware: 1 };
 const COOL_AFTER_BLOCK = 30 * 60 * 1000;  // nach 403/429 so lange nicht wieder anklopfen
 const HOST_PAUSE = 1200;             // Pause zwischen zwei Anfragen an denselben Shop
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const EVENTS_KEEP = 500;
 // Pro Cron-Lauf: Workers-Limit sind 50 Anfragen; das Datenbudget hält die CPU-Zeit klein (Free-Tarif).
 const RUN_SUBREQ = 40;
-const RUN_BYTES = 8000000;   // entpackt; CS-Cart liefert ~1 MB je Seite
+const RUN_BYTES = 12000000;  // entpackt; CS-Cart ~1 MB, Shopware ~3 MB je Seite
 
 function corsHeaders(extra) {
   return Object.assign({
@@ -574,8 +574,100 @@ function suProduct(html, url) {
   };
 }
 
-const fetchSource = (src, max) => (src.item ? fetchItem(src).then((r) => { r.list.forEach((x) => { x.id = 'x'; }); return r; }) : src.type === 'wog' ? fetchWog(src) : src.type === 'woocommerce' ? fetchWoo(src, max) : src.type === 'epages' ? fetchEpages(src, max) : src.type === 'cscart' ? fetchCs(src, max) : src.type === 'sumup' ? fetchSumup(src, max) : fetchShopify(src, max));
-const srcKey = (s) => (s.item ? 'item:' + new URL(s.url).origin + '|' + (s.item.handle || s.item.slug || s.item.pid) + '|' + (s.item.vid || '') : s.type === 'wog' ? 'wog' : s.type === 'woocommerce' ? wooApi(s) + '#' + (s.cat || '') : s.type === 'epages' ? epagesApi(s) + '#' + (s.cat || '') : s.type === 'cscart' ? csClean(s.url) : s.type === 'sumup' ? suPageUrl(s.url, 1) : shopifyApi(s));
+// Shopware 6 (z. B. twomoons.ch): jede Kachel traegt ihre Daten als JSON im
+// Attribut data-product-information (id, Name, Marke, Preis); Link, Bild und der
+// Kaufen-Knopf stehen daneben. 96 Artikel je Seite, dafuer sehr viel Markup.
+const isShopware = (html) => html.includes('data-product-information="');
+const isSwListing = (html) => /js-listing-wrapper|cms-listing-row/.test(html);
+const isSwDetail = (html) => html.includes('product-detail-name');
+
+function swItems(html) {
+  const out = [];
+  const parts = html.split('data-product-information="');
+  for (let k = 1; k < parts.length; k++) {
+    const c = parts[k], q = c.indexOf('"');
+    if (q < 0) continue;
+    let info = null;
+    try { info = JSON.parse(decodeEntities(c.slice(0, q))); } catch (e) { continue; }
+    if (!info || !info.id || !info.name) continue;
+    const m = (re) => { const x = c.match(re); return x ? x[1] : ''; };
+    const u = m(/<a\s[^>]*?href="([^"]+)"[^>]*?class="product-name/);
+    if (!u) continue;
+    const srcset = m(/data-srcset="([^"]+)"/) || m(/srcset="([^"]+)"/);
+    const price = Number(info.price);
+    const t = decodeEntities(String(info.name));
+    out.push({
+      id: String(info.id), t,
+      p: price > 0 ? price : null,
+      // Ausverkauftes blendet der Shop aus der Liste aus; der Kaufen-Knopf bleibt
+      // trotzdem das ehrlichste Zeichen, falls er doch einmal etwas stehen laesst.
+      a: /btn-buy/.test(c) ? 1 : 0,
+      u, i: srcset.split(',')[0].trim().split(' ')[0],
+      g: franchiseOf(t + ' ' + (info.brand || '') + ' ' + u),
+      hay: t + ' ' + (info.brand || '') + ' ' + u,
+    });
+  }
+  return out;
+}
+
+function swPageUrl(base, n) {
+  const u = new URL(base);
+  if (n > 1) u.searchParams.set('p', String(n)); else u.searchParams.delete('p');
+  return u.toString();
+}
+
+async function fetchShopware(src, plan) {
+  const want = Array.isArray(plan) && plan.length ? plan : [1];
+  const out = [], seen = new Set();
+  let pages = 0, bytes = 0, firstCount = 0, perPage = 0, end = false;
+  for (const p of want) {
+    if (pages) await sleep(HOST_PAUSE);
+    const { html, bytes: b } = await getHtml(swPageUrl(src.url, p));
+    pages++; bytes += b;
+    const list = swItems(html);
+    if (!list.length) {
+      if (p === 1) throw new Error(new URL(src.url).host + ': keine Produktliste gefunden');
+      end = true; break;
+    }
+    for (const it of list) {
+      if (seen.has(it.id)) continue;
+      seen.add(it.id);
+      if (passes(src, it.hay)) { delete it.hay; out.push(it); }
+    }
+    if (p === 1) { firstCount = out.length; perPage = list.length; }
+    if (perPage && list.length < perPage) { end = true; break; }   // letzte Seite war nicht voll
+  }
+  return { list: out, pages, bytes, firstCount, end };
+}
+
+// Produktseite: Name in der H1 (ohne die Marken-Zeile darueber), Preis als
+// Mikrodaten-Angabe. Die id spielt hier keine Rolle, beobachtete Produkte
+// bekommen ohnehin einen festen Schluessel.
+function swProduct(html, url) {
+  const h1 = (html.match(/<h1[^>]*class="[^"]*product-detail-name[^"]*"[^>]*>([\s\S]*?)<\/h1>/) || [])[1] || '';
+  // In der H1 steht die Marke als eigene Zeile ueber dem Namen – sie gehoert nicht in
+  // den Titel, hilft aber beim Zuordnen des Franchise.
+  const brand = stripTags((h1.match(/<span class="subheadings">([\s\S]*?)<\/span>/) || [])[1]);
+  const t = stripTags(h1.replace(/<span class="subheadings">[\s\S]*?<\/span>/g, '')
+    .replace(/<span class="product-va[\s\S]*$/, ''));
+  if (!t) throw new Error('Produktseite nicht lesbar');
+  const price = parseFloat((html.match(/itemprop="price"[^>]*content="([^"]+)"/) || [])[1]);
+  const u = (html.match(/rel="canonical" href="([^"]+)"/) || [])[1] || url;
+  // Produktbild, nicht das Shop-Logo
+  const gal = (html.match(/<img[^>]*js-magnifier-image[^>]*>/) || [''])[0];
+  const img = (gal.match(/\ssrc="([^"]+)"/) ||
+    html.match(/src="(https?:\/\/[^"]*\/(?:thumbnail|media)\/(?:(?!logo)[^"])+\.(?:jpg|jpeg|png|webp)[^"]*)"/) || [])[1] || '';
+  return {
+    id: u, pid: u, t,
+    p: price > 0 ? price : null,
+    a: /btn-buy/.test(html) ? 1 : 0,
+    u, i: img,
+    g: franchiseOf(t + ' ' + brand + ' ' + u),
+  };
+}
+
+const fetchSource = (src, max) => (src.item ? fetchItem(src).then((r) => { r.list.forEach((x) => { x.id = 'x'; }); return r; }) : src.type === 'wog' ? fetchWog(src) : src.type === 'woocommerce' ? fetchWoo(src, max) : src.type === 'epages' ? fetchEpages(src, max) : src.type === 'cscart' ? fetchCs(src, max) : src.type === 'sumup' ? fetchSumup(src, max) : src.type === 'shopware' ? fetchShopware(src, max) : fetchShopify(src, max));
+const srcKey = (s) => (s.item ? 'item:' + new URL(s.url).origin + '|' + (s.item.handle || s.item.slug || s.item.pid) + '|' + (s.item.vid || '') : s.type === 'wog' ? 'wog' : s.type === 'woocommerce' ? wooApi(s) + '#' + (s.cat || '') : s.type === 'epages' ? epagesApi(s) + '#' + (s.cat || '') : s.type === 'cscart' ? csClean(s.url) : s.type === 'sumup' ? suPageUrl(s.url, 1) : s.type === 'shopware' ? swPageUrl(s.url, 1) : shopifyApi(s));
 
 
 // Shop-Typ erkennen (wog.ch, Shopify, WooCommerce) und einen lesbaren Namen bilden.
@@ -623,6 +715,11 @@ async function detectSource(url) {
       // html/shopName nur fuer probeLink; gespeichert werden nur id/name/url/type/fr/cat
       return { type: 'cscart', url: withQuery, name: cs.name ? name + ' · ' + cs.name : name, shopName: name, html };
     }
+    if (isShopware(html)) {
+      const site = decodeEntities((html.match(/property="og:site_name" content="([^"]*)"/) || [])[1] || '')
+        || stripTags((html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/) || [])[1]) || shop;
+      return { type: 'shopware', url: withQuery, name: site, shopName: site, html };
+    }
     if (isSumUpList(html) || isSumUpProduct(html)) {
       const site = decodeEntities((html.match(/og:site_name" content="([^"]*)"/) || [])[1] || '') || shop;
       // Query behalten: darin steckt die Sortierung „Neuste zuerst“
@@ -633,7 +730,7 @@ async function detectSource(url) {
   // antworten mit einer Captcha-Seite. Das ist kein unbekannter Shop-Typ, sondern eine
   // bewusste Sperre des Betreibers – die Meldung soll das auch so sagen.
   if (blocked) throw new Error(host + ' sperrt automatische Abrufe (' + blocked.replace(/^.*?: /, '') + '). Dieser Shop lässt sich nicht überwachen.');
-  throw new Error('Shop-Typ nicht erkannt (unterstützt: Shopify, WooCommerce, ePages, CS-Cart, SumUp, wog.ch)');
+  throw new Error('Shop-Typ nicht erkannt (unterstützt: Shopify, WooCommerce, Shopware, ePages, CS-Cart, SumUp, wog.ch)');
 }
 
 
@@ -702,6 +799,10 @@ async function fetchItem(src) {
   if (src.type === 'sumup') {
     const { html, bytes } = await getHtml(src.url);
     return { list: [suProduct(html, src.url)], pages: 1, bytes };
+  }
+  if (src.type === 'shopware') {
+    const { html, bytes } = await getHtml(src.url);
+    return { list: [swProduct(html, src.url)], pages: 1, bytes };
   }
   const { html, bytes } = await getHtml(src.url);
   return { list: [wogItemFromHtml(html, src.url)], pages: 1, bytes };
@@ -775,6 +876,18 @@ async function probeLink(raw) {
       items: list.map((x) => ({ type: 'cscart', shop: name, title: x.t, price: x.p, a: x.a, img: x.i, url: x.u, item: { pid: x.id } })) };
   }
 
+  if (det && det.type === 'shopware') {
+    const swHtml = det.html || (await getHtml(det.url)).html;
+    const name = det.shopName || shop;
+    if (isSwDetail(swHtml) && !isSwListing(swHtml)) {
+      const x = swProduct(swHtml, det.url);
+      return { kind: 'product', shop: name, items: tag([x], 'shopware', name, { pid: x.pid }) };
+    }
+    const list = swItems(swHtml).slice(0, 12);
+    return { kind: 'collection', shop: name, source: { url: det.url },
+      items: list.map((x) => ({ type: 'shopware', shop: name, title: x.t, price: x.p, a: x.a, img: x.i, url: x.u, item: { pid: x.id, url: x.u } })) };
+  }
+
   if (det && det.type === 'sumup') {
     const suHtml = det.html || (await getHtml(det.url)).html;
     const name = det.shopName || shop;
@@ -810,7 +923,7 @@ async function probeLink(raw) {
     const { data } = await getJson(epagesApi({ url: det.url }) + '?resultsPerPage=12&page=1' + (det.cat ? '&categoryId=' + det.cat : ''));
     return { kind: 'collection', shop: det.name, source: { url: det.url }, items: (data.products || []).map((p) => { const x = epagesNorm(p, u.origin); return { type: 'epages', shop: det.name, title: x.t, price: x.p, a: x.a, img: x.i, url: x.u, item: { pid: p.productId } }; }) };
   }
-  throw new Error('Weder Produkt noch Kollektion erkannt – unterstützt sind Shopify, WooCommerce, ePages, CS-Cart, SumUp und wog.ch');
+  throw new Error('Weder Produkt noch Kollektion erkannt – unterstützt sind Shopify, WooCommerce, Shopware, ePages, CS-Cart, SumUp und wog.ch');
 }
 
 
