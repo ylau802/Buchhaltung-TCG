@@ -933,19 +933,32 @@ function diff(src, list, prev, init, now, silentFrom) {
   for (const it of list) {
     i++;
     const old = prev[it.id];
+    let keep = null;   // Bezugspreis, der stehen bleibt (siehe unten)
     if (init) {
       const ev = { s: src.shop || src.name, id: it.id, t: it.t, p: it.p, a: it.a, u: it.u, i: it.i, g: it.g, at: now };
       if (!old) { if (i < limit) events.push(Object.assign({ k: 'new' }, ev)); }
       else {
-        if (old[0] != null && it.p != null && Math.abs(old[0] - it.p) > 0.004) events.push(Object.assign({ k: 'price', o: old[0] }, ev));
+        const moved = old[0] != null && it.p != null ? it.p - old[0] : 0;
+        if (it.a === 1 && Math.abs(moved) > PRICE_MIN + 0.004) {
+          events.push(Object.assign({ k: 'price', o: old[0] }, ev));
+        } else if (it.a === 1 && moved) {
+          // Kleiner Ausschlag (bei Importshops oft taeglich der Wechselkurs): nicht melden,
+          // aber den alten Preis als Bezugspunkt behalten. So faellt ein echtes Klettern
+          // in Ein-Franken-Schritten trotzdem auf, sobald der Franken voll ist.
+          keep = old[0];
+        }
         if (old[1] === 0 && it.a === 1) events.push(Object.assign({ k: 'stock' }, ev));
       }
     }
-    next[it.id] = [it.p, it.a];
+    next[it.id] = [keep == null ? it.p : keep, it.a];
   }
   return { next, events };
 }
 
+// Preisaenderungen werden nur bei verfuegbaren Artikeln gemeldet und erst, wenn sich
+// der Preis um mehr als diesen Betrag bewegt hat – darunter ist es bei Importshops
+// meist nur der Wechselkurs.
+const PRICE_MIN = 1;
 const KIND_LABEL = { new: 'Neu', price: 'Preisänderung', stock: 'Wieder verfügbar' };
 function describe(ev) {
   if (ev.k === 'price') return chf(ev.o) + ' → ' + chf(ev.p) + (ev.p < ev.o ? ' ▼' : ' ▲');
