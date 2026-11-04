@@ -26,7 +26,7 @@
  *   Vault (siehe oben) lehnt /files jede Anfrage ab.
  *
  * News-Monitor: ein Cron-Trigger (alle 5 Min.) prüft reihum die in der App eingetragenen
- * Shops (Shopify, WooCommerce, ePages und wog.ch), filtert auf Pokémon / One Piece / Dragon Ball,
+ * Shops (Shopify, WooCommerce, ePages, CS-Cart und wog.ch), filtert auf Pokémon / One Piece / Dragon Ball,
  * vergleicht mit dem letzten Stand und meldet per Mail (Resend-API): neue Produkte,
  * Preisänderungen, ausverkauft -> wieder verfügbar.
  *   GET    /news                -> { sources, events, lastRun, lastError, mail }
@@ -346,13 +346,11 @@ async function fetchEpages(src) {
 
 // Kategorieseite -> { id, name, shop }. id = null bedeutet "ganzer Shop".
 // Gibt null zurueck, wenn die Seite kein ePages-Shop ist.
-async function epagesCategory(url) {
-  const u = new URL(url);
-  const { html } = await getHtml(u.origin + u.pathname);
+function epagesFromHtml(pathname, html) {
   const st = epagesState(html);
   if (!st) return null;
   const shopName = (st.shop && (st.shop.title || st.shop.name)) || '';
-  const cm = decodeURIComponent(u.pathname).match(/^\/c\/(.+?)\/*$/);
+  const cm = decodeURIComponent(pathname).match(/^\/c\/(.+?)\/*$/);
   if (!cm) return { id: null, name: '', shop: shopName };
   const id = (st.categorySlugsToGUIDs || {})[cm[1]];
   if (!id) throw new Error('Kategorie nicht gefunden (URL der Kategorie-Seite verwenden)');
@@ -360,8 +358,81 @@ async function epagesCategory(url) {
   return { id, name: (cat && cat.title) || cm[1], shop: shopName };
 }
 
-const fetchSource = (src) => (src.item ? fetchItem(src).then((r) => { r.list.forEach((x) => { x.id = 'x'; }); return r; }) : src.type === 'wog' ? fetchWog(src) : src.type === 'woocommerce' ? fetchWoo(src) : src.type === 'epages' ? fetchEpages(src) : fetchShopify(src));
-const srcKey = (s) => (s.item ? 'item:' + new URL(s.url).origin + '|' + (s.item.handle || s.item.slug || s.item.pid) + '|' + (s.item.vid || '') : s.type === 'wog' ? 'wog' : s.type === 'woocommerce' ? wooApi(s) + '#' + (s.cat || '') : s.type === 'epages' ? epagesApi(s) + '#' + (s.cat || '') : shopifyApi(s));
+// CS-Cart (z. B. goodgamesbern.ch): keine offene Schnittstelle, aber sehr
+// regelmaessiges HTML – je Produkt ein <form name="product_form_<id>">, darin
+// Titel, Preis (verstecktes Feld) und Lagerzustand. Die Liste ist nach "Neuste
+// zuerst" sortiert, darum reichen fuer einen News-Monitor die ersten Seiten.
+const CS_MAX_PAGES = 2;
+const csClean = (u) => new URL(u).origin + new URL(u).pathname;
+const stripTags = (s) => decodeEntities(String(s || '').replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim());
+const isCsCart = (html) => /name="product_form_\d+"/.test(html) && /\[price\]" value=/.test(html);
+
+function csItems(html, origin) {
+  const out = [];
+  const parts = html.split(/name="product_form_(\d+)"/);
+  for (let k = 1; k < parts.length; k += 2) {
+    const id = parts[k], blk = parts[k + 1];
+    const m = (re) => { const x = blk.match(re); return x ? x[1] : ''; };
+    const t = decodeEntities(m(/class="product-title"[^>]*title="([^"]*)"/));
+    let u = m(/<a href="([^"]+)" class="product-title"/);
+    if (!t || !u) continue;                      // kein Listeneintrag (z. B. Warenkorb-Formular)
+    if (!/^https?:/.test(u)) u = origin + (u.startsWith('/') ? '' : '/') + u;
+    const price = parseFloat(m(new RegExp('product_data\\[' + id + '\\]\\[price\\]" value="([\\d.]+)"')));
+    const img = m(new RegExp('id="det_img_' + id + '[a-z]*"[^>]*src="([^"]+)"'));
+    out.push({
+      id, t, p: price > 0 ? price : null,
+      a: blk.includes('out_of_stock_info_' + id) ? 0 : 1,
+      u, i: img, g: franchiseOf(t + ' ' + u),
+    });
+  }
+  return out;
+}
+
+async function fetchCs(src) {
+  const origin = new URL(src.url).origin;
+  const out = [], seen = new Set();
+  let url = csClean(src.url), pages = 0, bytes = 0, truncated = false;
+  for (let page = 1; page <= CS_MAX_PAGES && url; page++) {
+    const { html, bytes: b } = await getHtml(url);
+    pages++; bytes += b;
+    const list = csItems(html, origin);
+    if (!list.length && page === 1) throw new Error(new URL(src.url).host + ': keine Produktliste gefunden');
+    for (const it of list) {
+      if (seen.has(it.id)) continue;
+      seen.add(it.id);
+      if (passes(src, it.t + ' ' + it.u)) out.push(it);
+    }
+    const nx = html.match(/rel="next" href="([^"]+)"/);
+    url = nx ? nx[1] : null;
+    if (url && page === CS_MAX_PAGES) truncated = true;
+  }
+  return { list: out, pages, bytes, truncated };
+}
+
+// Produktseite: das erste Formular gehoert zum Produkt selbst, danach kommen
+// nur noch Zubehoer- und Empfehlungsblöcke.
+function csProduct(html, url) {
+  const id = (html.match(/name="product_form_(\d+)"/) || [])[1];
+  const t = stripTags((html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/) || [])[1]);
+  if (!id || !t) throw new Error('Produktseite nicht lesbar');
+  const price = parseFloat((html.match(new RegExp('product_data\\[' + id + '\\]\\[price\\]" value="([\\d.]+)"')) || [])[1]);
+  const u = (html.match(/rel="canonical" href="([^"]+)"/) || [])[1] || csClean(url);
+  return {
+    id, pid: id, t, p: price > 0 ? price : null,
+    a: html.includes('out_of_stock_info_' + id) ? 0 : 1,
+    u, i: ((html.match(/og:image" content="\s*([^"]+)"/) || [])[1] || '').trim(),
+    g: franchiseOf(t + ' ' + u),
+  };
+}
+
+function csFromHtml(html) {
+  if (!isCsCart(html)) return null;
+  const site = (html.match(/"@type":\s*"WebSite"[\s\S]{0,300}?"name":\s*"([^"]+)"/) || [])[1] || '';
+  return { shop: decodeEntities(site), name: stripTags((html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/) || [])[1]) };
+}
+
+const fetchSource = (src) => (src.item ? fetchItem(src).then((r) => { r.list.forEach((x) => { x.id = 'x'; }); return r; }) : src.type === 'wog' ? fetchWog(src) : src.type === 'woocommerce' ? fetchWoo(src) : src.type === 'epages' ? fetchEpages(src) : src.type === 'cscart' ? fetchCs(src) : fetchShopify(src));
+const srcKey = (s) => (s.item ? 'item:' + new URL(s.url).origin + '|' + (s.item.handle || s.item.slug || s.item.pid) + '|' + (s.item.vid || '') : s.type === 'wog' ? 'wog' : s.type === 'woocommerce' ? wooApi(s) + '#' + (s.cat || '') : s.type === 'epages' ? epagesApi(s) + '#' + (s.cat || '') : s.type === 'cscart' ? csClean(s.url) : shopifyApi(s));
 
 
 // Shop-Typ erkennen (wog.ch, Shopify, WooCommerce) und einen lesbaren Namen bilden.
@@ -391,16 +462,23 @@ async function detectSource(url) {
   } catch (e) {
     if (/Kategorie/.test(e.message)) throw e;
   }
-  try {
-    const cat = await epagesCategory(clean);
+  // Shops ohne offene Schnittstelle: die Seite einmal holen und daraus erkennen.
+  let html = null;
+  try { ({ html } = await getHtml(clean)); } catch (e) { /* weiter */ }
+  if (html) {
+    const cat = epagesFromHtml(u.pathname, html);   // wirft bei unbekannter Kategorie
     if (cat) {
       const name = cat.shop || shop;
       return { type: 'epages', url: clean, cat: cat.id, name: cat.id ? name + ' · ' + cat.name : name };
     }
-  } catch (e) {
-    if (/Kategorie/.test(e.message)) throw e;
+    const cs = csFromHtml(html);
+    if (cs) {
+      const name = cs.shop || shop;
+      // html/shopName nur fuer probeLink; gespeichert werden nur id/name/url/type/fr/cat
+      return { type: 'cscart', url: clean, name: cs.name ? name + ' · ' + cs.name : name, shopName: name, html };
+    }
   }
-  throw new Error('Shop-Typ nicht erkannt (unterstützt: Shopify, WooCommerce, ePages, wog.ch)');
+  throw new Error('Shop-Typ nicht erkannt (unterstützt: Shopify, WooCommerce, ePages, CS-Cart, wog.ch)');
 }
 
 
@@ -462,6 +540,10 @@ async function fetchItem(src) {
     const x = epagesNorm(data, origin); delete x.hay;
     return { list: [x], pages: 1, bytes };
   }
+  if (src.type === 'cscart') {
+    const { html, bytes } = await getHtml(csClean(src.url));
+    return { list: [csProduct(html, src.url)], pages: 1, bytes };
+  }
   const { html, bytes } = await getHtml(src.url);
   return { list: [wogItemFromHtml(html, src.url)], pages: 1, bytes };
 }
@@ -519,6 +601,20 @@ async function probeLink(raw) {
   // Kollektion / Shop (Shopify oder WooCommerce) – oder WooCommerce-Produkt
   let det;
   try { det = await detectSource(raw); } catch (e) { det = null; }
+
+  // CS-Cart: Produktseite und Kategorie stecken beide im HTML, das die
+  // Erkennung schon geholt hat – kein zweiter Abruf noetig.
+  if (det && det.type === 'cscart') {
+    const csHtml = det.html || (await getHtml(det.url)).html;
+    const name = det.shopName || shop;
+    if (csHtml.includes('ty-product-block')) {       // Produktseite
+      const x = csProduct(csHtml, det.url);
+      return { kind: 'product', shop: name, items: tag([x], 'cscart', name, { pid: x.pid }) };
+    }
+    const list = csItems(csHtml, u.origin).slice(0, 12);
+    return { kind: 'collection', shop: det.name, source: { url: det.url },
+      items: list.map((x) => ({ type: 'cscart', shop: name, title: x.t, price: x.p, a: x.a, img: x.i, url: x.u, item: { pid: x.id } })) };
+  }
   if (det && det.type === 'shopify' && !sm) {
     const { data } = await getJson(shopifyApi({ url: det.url }) + '?limit=12');
     const list = (data.products || []).map((p) => shopifyJsItems(Object.assign({ type: p.product_type, vendor: p.vendor, featured_image: p.images && p.images[0] && p.images[0].src }, p, { variants: (p.variants || []).map((v) => Object.assign({}, v, { price: v.price })) }), u.origin, null, false)[0]);
@@ -543,7 +639,7 @@ async function probeLink(raw) {
     const { data } = await getJson(epagesApi({ url: det.url }) + '?resultsPerPage=12&page=1' + (det.cat ? '&categoryId=' + det.cat : ''));
     return { kind: 'collection', shop: det.name, source: { url: det.url }, items: (data.products || []).map((p) => { const x = epagesNorm(p, u.origin); return { type: 'epages', shop: det.name, title: x.t, price: x.p, a: x.a, img: x.i, url: x.u, item: { pid: p.productId } }; }) };
   }
-  throw new Error('Weder Produkt noch Kollektion erkannt – unterstützt sind Shopify, WooCommerce, ePages und wog.ch');
+  throw new Error('Weder Produkt noch Kollektion erkannt – unterstützt sind Shopify, WooCommerce, ePages, CS-Cart und wog.ch');
 }
 
 
@@ -726,7 +822,7 @@ async function runWatch(env) {
     const st = Object.assign({}, state.src[s.id], { lastCheck: now });
     if (err) { st.lastError = err; state.src[s.id] = st; continue; }
     const d = diff(s, r.list, state.snap[s.id] || {}, !!st.init, now);
-    Object.assign(st, { lastOk: now, lastError: r.truncated ? 'sehr grosse Kollektion – nur die ersten ' + (MAX_PAGES * 250) + ' Produkte' : null,
+    Object.assign(st, { lastOk: now, lastError: r.truncated ? 'sehr grosse Kategorie – nur die ersten ' + r.pages + ' Seiten werden geprüft' : null,
       count: r.list.length, pages: r.pages, bytes: r.bytes, init: true });
     if (s.item && r.list[0]) st.cur = { p: r.list[0].p, a: r.list[0].a };
     commits.push([s.id, d.next, st, d.events.length]);
