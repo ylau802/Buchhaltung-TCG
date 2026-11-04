@@ -58,18 +58,23 @@ const PAGE_BUDGET = {
   shopify: [4, 4],        // 250 Artikel je Seite
   woocommerce: [4, 4],    // 100 je Seite
   epages: [3, 6],         // 100 je Seite
-  cscart: [1, 3],         // 48 je Seite, aber ~1 MB HTML – mehr sprengt das Budget je Lauf
-  sumup: [2, 10],         // nur 16 je Seite
   wog: [1, 1],
+  // cscart und sumup laufen ueber WINDOW, nicht ueber diese Tabelle
 };
 const FULL_EVERY = 50 * 60 * 1000;   // voller Durchlauf hoechstens stuendlich
+// Shops ohne Schnittstelle liefern wenige Artikel je Seite und viel Drumherum. Statt
+// einmal pro Stunde durch die ganze Kategorie zu rauschen (was goodgamesbern.ch mit
+// HTTP 403 quittiert hat), steht Seite 1 in jedem Lauf – dort erscheinen neue Artikel –
+// und dazu ein Fenster weiter hinten, das mit jedem Lauf weiterwandert. Nach ein paar
+// Laeufen war die ganze Kategorie dran, ohne je mehr als drei Seiten am Stueck zu holen.
+const WINDOW = { cscart: 1, sumup: 2 };
 const COOL_AFTER_BLOCK = 30 * 60 * 1000;  // nach 403/429 so lange nicht wieder anklopfen
 const HOST_PAUSE = 1200;             // Pause zwischen zwei Anfragen an denselben Shop
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const EVENTS_KEEP = 500;
 // Pro Cron-Lauf: Workers-Limit sind 50 Anfragen; das Datenbudget hält die CPU-Zeit klein (Free-Tarif).
 const RUN_SUBREQ = 40;
-const RUN_BYTES = 2500000;
+const RUN_BYTES = 8000000;   // entpackt; CS-Cart liefert ~1 MB je Seite
 
 function corsHeaders(extra) {
   return Object.assign({
@@ -408,27 +413,41 @@ function csItems(html, origin) {
   return out;
 }
 
-async function fetchCs(src, max) {
-  const origin = new URL(src.url).origin;
+// Seite 2 heisst /pokemon/page-2/. Listen mit Query (z. B. "Neueste") haben nur eine Seite.
+function csPageUrl(base, n) {
+  const u = new URL(base);
+  if (n <= 1 || u.search) return base;
+  return u.origin + u.pathname.replace(/\/+$/, '') + '/page-' + n + '/';
+}
+
+async function fetchCs(src, plan) {
+  const origin = new URL(src.url).origin, base = csClean(src.url);
+  const want = Array.isArray(plan) && plan.length ? plan : [1];
   const out = [], seen = new Set();
-  const lim = max || CS_MAX_PAGES;
-  let url = csClean(src.url), pages = 0, bytes = 0, truncated = false;
-  for (let page = 1; page <= lim && url; page++) {
-    if (page > 1) await sleep(HOST_PAUSE);   // je Seite ein Megabyte – nicht am Stueck anfordern
-    const { html, bytes: b } = await getHtml(url);
+  let pages = 0, bytes = 0, firstCount = 0, end = false;
+  for (const p of want) {
+    if (p > 1 && new URL(base).search) { end = true; break; }   // nur eine Seite vorhanden
+    if (pages) await sleep(HOST_PAUSE);   // je Seite ein Megabyte – nicht am Stueck anfordern
+    let html, b;
+    try { ({ html, bytes: b } = await getHtml(csPageUrl(base, p))); }
+    catch (e) {
+      if (p > 1 && /HTTP 404/.test(e.message)) { end = true; break; }   // hinter der letzten Seite
+      throw e;
+    }
     pages++; bytes += b;
     const list = csItems(html, origin);
-    if (!list.length && page === 1) throw new Error(new URL(src.url).host + ': keine Produktliste gefunden');
+    if (!list.length) {
+      if (p === 1) throw new Error(new URL(src.url).host + ': keine Produktliste gefunden');
+      end = true; break;
+    }
     for (const it of list) {
       if (seen.has(it.id)) continue;
       seen.add(it.id);
       if (passes(src, it.t + ' ' + it.u)) out.push(it);
     }
-    const nx = html.match(/rel="next" href="([^"]+)"/);
-    url = nx ? nx[1] : null;
-    if (url && page === lim) truncated = true;
+    if (p === 1) firstCount = out.length;
   }
-  return { list: out, pages, bytes, truncated };
+  return { list: out, pages, bytes, firstCount, end };
 }
 
 // Produktseite: das erste Formular gehoert zum Produkt selbst, danach kommen
@@ -503,30 +522,31 @@ function suPageUrl(raw, page) {
   return u.toString();
 }
 
-async function fetchSumup(src, max) {
+async function fetchSumup(src, plan) {
+  const want = Array.isArray(plan) && plan.length ? plan : [1];
   const out = [], seen = new Set();
-  const lim = max || SU_MAX_PAGES;
-  let pages = 0, bytes = 0, truncated = false, more = true;
-  for (let page = 1; page <= lim && more; page++) {
-    if (page > 1) await sleep(HOST_PAUSE);
-    const { html, bytes: b } = await getHtml(suPageUrl(src.url, page));
+  let pages = 0, bytes = 0, firstCount = 0, end = false;
+  for (const p of want) {
+    if (pages) await sleep(HOST_PAUSE);
+    const { html, bytes: b } = await getHtml(suPageUrl(src.url, p));
     pages++; bytes += b;
     const list = suItems(html);
     if (!list.length) {
-      if (page === 1) throw new Error(new URL(src.url).host + ': keine Produktliste gefunden');
-      break;
+      if (p === 1) throw new Error(new URL(src.url).host + ': keine Produktliste gefunden');
+      end = true; break;
     }
     for (const it of list) {
       if (seen.has(it.id)) continue;
       seen.add(it.id);
       if (passes(src, it.t + ' ' + it.u)) out.push(it);
     }
-    // rel="next" steht bei SumUp auf jeder Seite, auch auf der letzten und auf leeren –
-    // als Hinweis auf weitere Seiten taugt nur eine volle Seite.
-    more = list.length >= SU_PER_PAGE;
-    if (more && page === lim) truncated = true;
+    // rel="next" steht bei SumUp auf jeder Seite, auch auf leeren – nur eine volle Seite
+    // ist ein Hinweis darauf, dass es weitergeht.
+    if (list.length < SU_PER_PAGE) { end = true; break; }
+    if (p === 1) firstCount = out.length;
   }
-  return { list: out, pages, bytes, truncated };
+  if (want[0] === 1 && !firstCount) firstCount = out.length;
+  return { list: out, pages, bytes, firstCount, end };
 }
 
 // Produktseite: SumUp liefert dort JSON-LD (Product + Offer) – damit stimmen
@@ -1002,13 +1022,22 @@ async function runWatch(env) {
       for (const s of queues[next++]) {
         if (done++) await sleep(HOST_PAUSE);   // nicht zwei Quellen desselben Shops am Stueck
         const h0 = state.src[s.id] || {};
-        // Hoechstens eine Quelle je Lauf geht durch die ganze Kategorie. Sonst wollten
-        // nach einem Neustart alle gleichzeitig in die Tiefe und der Shop macht dicht.
-        const due = !h0.lastFull || Date.parse(now) - Date.parse(h0.lastFull) > FULL_EVERY;
-        const full = due && deep.n < 1;
-        if (full) deep.n++;
-        const budget = PAGE_BUDGET[s.type] || PAGE_BUDGET.shopify;
-        try { results.push({ s, full, r: await fetchSource(s, budget[full ? 1 : 0]) }); }
+        const win = WINDOW[s.type];
+        let plan, isFull = false;
+        if (win) {
+          // Seite 1 plus das wandernde Fenster
+          const cur = Math.max(2, h0.cursor || 2);
+          plan = [1];
+          for (let k = 0; k < win; k++) plan.push(cur + k);
+        } else {
+          // Schnittstellen-Shops: eine Quelle je Lauf darf tiefer schauen
+          const due = !h0.lastFull || Date.parse(now) - Date.parse(h0.lastFull) > FULL_EVERY;
+          const full = due && deep.n < 1;
+          if (full) deep.n++;
+          plan = (PAGE_BUDGET[s.type] || PAGE_BUDGET.shopify)[full ? 1 : 0];
+          isFull = full;
+        }
+        try { results.push({ s, full: win ? true : isFull, win, r: await fetchSource(s, plan) }); }
         catch (e) { results.push({ s, err: e.message }); }
       }
     }
@@ -1016,7 +1045,7 @@ async function runWatch(env) {
 
   const events = [];
   const commits = []; // [sourceId, nextSnap, st, nEvents]
-  for (const { s, r, err, full } of results) {
+  for (const { s, r, err, full, win } of results) {
     const st = Object.assign({}, state.src[s.id], { lastCheck: now });
     if (err) {
       if (/HTTP (40[13]|429)/.test(err)) {
@@ -1027,16 +1056,22 @@ async function runWatch(env) {
       } else st.lastError = err;
       state.src[s.id] = st; continue;
     }
-    // Hat dieser Lauf mehr Seiten gelesen als je zuvor, sind die zusaetzlich
-    // gefundenen Artikel Bestand, keine Neuheiten – sie werden still uebernommen.
     const snap = state.snap[s.id] || {};
+    // Beim wandernden Fenster koennen neue Artikel nur auf Seite 1 stehen (die Listen
+    // sind nach "Neuste zuerst" sortiert). Was das Fenster weiter hinten zutage foerdert,
+    // steht laengst im Laden und wird still uebernommen.
+    // Bei den anderen gilt dasselbe, sobald ein Lauf tiefer liest als je zuvor.
     const deeper = r.pages > (st.seenPages || 0);
-    const d = diff(s, r.list, snap, !!st.init, now, deeper ? Object.keys(snap).length : null);
+    const silentFrom = win ? r.firstCount : (deeper ? Object.keys(snap).length : null);
+    const d = diff(s, r.list, snap, !!st.init, now, silentFrom);
     st.seenPages = Math.max(st.seenPages || 0, r.pages);
+    // Fenster weiterschieben; hinter der letzten Seite wieder vorne anfangen
+    if (win) st.cursor = r.end ? 2 : Math.max(2, st.cursor || 2) + win;
     // Ein Schnelldurchlauf liest absichtlich nur die neuesten Seiten – das ist kein Fehler.
     // Gemeldet wird nur, wenn auch der volle Durchlauf nicht bis zum Ende kam.
     Object.assign(st, { lastOk: now, lastError: full && r.truncated ? 'sehr grosse Kategorie – geprüft werden die ' + r.list.length + ' neuesten Artikel' : null,
-      count: r.list.length, pages: r.pages, bytes: r.bytes, init: true });
+      count: win ? Math.max(st.count || 0, Object.keys(d.next).length) : r.list.length,
+      pages: r.pages, bytes: r.bytes, init: true });
     if (full) st.lastFull = now;
     // Beim ersten Mal die vollen Durchlaeufe ueber die Stunde verteilen, damit nicht
     // alle Quellen eines Shops immer im selben Lauf in die Tiefe gehen.
