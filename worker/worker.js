@@ -1334,20 +1334,101 @@ async function fetchWix(src, max) {
   return { list: out, pages: n, bytes, truncated: (pm.totalCount || 0) > (pm.list || []).length };
 }
 
+// friends-collective.site (die Bilder liegen auf factory.nosama.store, daher der
+// Name). Next.js mit App Router: die Produkte stehen nicht im Markup, sondern in
+// den Datenpaketen self.__next_f.push([1,"..."]). Dort liegt allerdings der ganze
+// Katalog, auch wenn die Seite nur eine Welt zeigt. Welche Artikel gemeint sind,
+// verraten die Produktlinks im gerenderten HTML - so bleibt der Filter des Shops
+// (?world=one-piece) erhalten, ohne ihn nachbauen zu muessen.
+function nosamaFlight(html) {
+  let all = '';
+  for (const m of html.matchAll(/self\.__next_f\.push\(\[1,("(?:[^"\\]|\\.)*")\]\)/g)) {
+    try { all += JSON.parse(m[1]); } catch (e) { /* angebrochenes Paket */ }
+  }
+  return all;
+}
+// Die Objekte stehen mitten im Datenstrom, nicht als eigenes JSON. Darum von
+// {"factoryProductId" aus die Klammern zaehlen, bis das Objekt zu ist.
+function nosamaProducts(html) {
+  const all = nosamaFlight(html);
+  const out = new Map();
+  let i = -1;
+  while ((i = all.indexOf('{"factoryProductId"', i + 1)) >= 0) {
+    const stop = Math.min(all.length, i + 20000);
+    let depth = 0, j = i, inStr = false, esc = false;
+    for (; j < stop; j++) {
+      const c = all[j];
+      if (esc) { esc = false; continue; }
+      if (c === '\\') { esc = true; continue; }
+      if (c === '"') { inStr = !inStr; continue; }
+      if (inStr) continue;
+      if (c === '{') depth++;
+      else if (c === '}') { depth--; if (!depth) { j++; break; } }
+    }
+    if (depth) continue;
+    try { const o = JSON.parse(all.slice(i, j)); if (o.factoryProductId) out.set(o.factoryProductId, o); } catch (e) { /* weiter */ }
+  }
+  return out;
+}
+// Im Quelltext steht das Feld escaped ({\"factoryProductId\"), darum ohne
+// Anfuehrungszeichen suchen. Ob die Seite auch Produkte zeigt, ist eine zweite
+// Frage - die beantwortet die Erkennung mit einer eigenen Meldung.
+const isNosama = (html) => html.includes('factoryProductId') && html.includes('__next_f');
+const hasNosamaLinks = (html) => /href="\/[a-z]{2}\/shop\/products\/[0-9a-f-]{36}"/.test(html);
+
+function nosamaItems(html, base) {
+  const data = nosamaProducts(html);
+  const out = [], seen = new Set();
+  // Reihenfolge und Auswahl wie auf der Seite.
+  for (const m of html.matchAll(/href="(\/[a-z]{2}\/shop\/products\/([0-9a-f-]{36}))"/g)) {
+    const id = m[2];
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const p = data.get(id);
+    if (!p || !p.title) continue;
+    const t = decodeEntities(String(p.title));
+    const u = new URL(m[1], base).toString();
+    const brand = String(p.brand || '').replace(/_/g, ' ');
+    out.push({
+      id,
+      t,
+      // Preise stehen in Rappen.
+      p: p.priceMinor > 0 ? p.priceMinor / 100 : null,
+      a: p.buyable && (p.availableQuantity == null || p.availableQuantity > 0) ? 1 : 0,
+      u,
+      i: p.imageUrl || (Array.isArray(p.imageUrls) ? p.imageUrls[0] : '') || '',
+      g: franchiseOf(t + ' ' + brand + ' ' + u),
+      hay: t + ' ' + brand + ' ' + (p.setCode || '') + ' ' + u,
+    });
+  }
+  return out;
+}
+
+async function fetchNosama(src) {
+  const { html, bytes } = await getHtml(src.url);
+  const list = nosamaItems(html, src.url);
+  if (!list.length) throw new Error(new URL(src.url).host + ': keine Produktliste gefunden');
+  const out = [];
+  for (const it of list) if (passes(src, it.hay)) { delete it.hay; out.push(it); }
+  return { list: out, pages: 1, bytes };
+}
+
 const fetchSource = (src, max) => (src.item ? fetchItem(src).then((r) => { r.list.forEach((x) => { x.id = 'x'; }); return r; }) : src.type === 'wog' ? fetchWog(src) : src.type === 'woocommerce' ? fetchWoo(src, max) : src.type === 'epages' ? fetchEpages(src, max) : src.type === 'cscart' ? fetchCs(src, max) : src.type === 'sumup' ? fetchSumup(src, max) : src.type === 'shopware' ? fetchShopware(src, max)
   : src.type === 'prestashop' ? fetchPresta(src, max)
   : src.type === 'jsonld' ? fetchJsonLd(src, max)
   : src.type === 'epages6' ? fetchEpages6(src, max)
   : src.type === 'manor' ? fetchManor(src, max)
   : src.type === 'softridge' ? fetchSoftridge(src, max)
-  : src.type === 'wix' ? fetchWix(src, max) : fetchShopify(src, max));
+  : src.type === 'wix' ? fetchWix(src, max)
+  : src.type === 'nosama' ? fetchNosama(src) : fetchShopify(src, max));
 const srcKey = (s) => (s.item ? 'item:' + new URL(s.url).origin + '|' + (s.item.handle || s.item.slug || s.item.pid) + '|' + (s.item.vid || '') : s.type === 'wog' ? 'wog' : s.type === 'woocommerce' ? wooApi(s) + '#' + (s.cat || '') : s.type === 'epages' ? epagesApi(s) + '#' + (s.cat || '') : s.type === 'cscart' ? csClean(s.url) : s.type === 'sumup' ? suPageUrl(s.url, 1) : s.type === 'shopware' ? swPageUrl(s.url, 1)
   : s.type === 'prestashop' ? psPageUrl(s.url, 1, 'p', 0)
   : s.type === 'jsonld' ? ldPageUrl(s.url, 1)
   : s.type === 'epages6' ? e6PageUrl(s.url, 1)
   : s.type === 'manor' ? manorPageUrl(s.url, 1)
   : s.type === 'softridge' ? srPageUrl(s, 1)
-  : s.type === 'wix' ? wixPageUrl(s.url, 1) : shopifyApi(s));
+  : s.type === 'wix' ? wixPageUrl(s.url, 1)
+  : s.type === 'nosama' ? s.url : shopifyApi(s));
 
 
 // Shop-Typ erkennen (wog.ch, Shopify, WooCommerce) und einen lesbaren Namen bilden.
@@ -1356,7 +1437,7 @@ async function detectSource(url) {
   try { u = new URL(url.includes('://') ? url : 'https://' + url); } catch (e) { throw new Error('keine gültige URL'); }
   if (!/^https?:$/.test(u.protocol)) throw new Error('keine gültige URL');
   const host = u.hostname.replace(/^www\./, '');
-  const shop = host.replace(/\.(ch|com|de|eu|net|shop|store)$/, '');
+  const shop = host.replace(/\.(ch|com|de|eu|net|shop|store|site|li|at|io|online)$/, '');
   if (/(^|\.)wog\.ch$/.test(host)) return { type: 'wog', url: DEFAULT_SOURCES[0].url, name: 'World of Games' };
 
   const clean = u.origin + u.pathname.replace(/\/+$/, '');
@@ -1384,9 +1465,9 @@ async function detectSource(url) {
   // Shops ohne offene Schnittstelle: die Seite einmal holen und daraus erkennen.
   // Mit Query – bei manchen Shops steckt die Liste genau darin.
   const withQuery = clean + (u.search || '');
-  let html = null, blocked = '';
+  let html = null, blocked = '', down = '';
   try { ({ html } = await getHtml(withQuery)); }
-  catch (e) { if (BLOCKED.test(e.message)) blocked = e.message; }
+  catch (e) { if (BLOCKED.test(e.message)) blocked = e.message; else down = e.message; }
   if (html) {
     if (isEpages6(html)) {
       // Die Adresse auf den Shop-Einstieg bringen; sonst wird jeder Parameter ignoriert.
@@ -1430,6 +1511,17 @@ async function detectSource(url) {
       // Query behalten: darin steckt die Sortierung „Neuste zuerst“
       return { type: 'sumup', url: withQuery, name: site, shopName: site, html };
     }
+    if (isNosama(html)) {
+      // Ohne Welt zeigt der Laden nur eine Startseite ohne Produkte.
+      if (!hasNosamaLinks(html)) {
+        throw new Error(host + ': diese Seite zeigt keine Produkte \u2013 bitte eine Welt w\u00e4hlen, z. B. ?world=all oder ?world=pokemon');
+      }
+      // Query behalten: darin steckt die Welt (?world=one-piece). Die taugt auch
+      // als Name; die Ueberschrift ist dort je nach Welt ein Werbespruch.
+      const world = (withQuery.match(/[?&]world=([a-z0-9-]+)/i) || [])[1] || '';
+      const label = world === 'all' ? 'Alle Welten' : (franchiseOf(world) || world);
+      return { type: 'nosama', url: withQuery, name: label ? shop + ' \u00b7 ' + label : shop, shopName: shop, html };
+    }
     if (isWix(html)) {
       const cat = wixCategory(html);
       return { type: 'wix', url: clean, name: cat ? shop + ' \u00b7 ' + cat : shop, shopName: shop, html };
@@ -1458,6 +1550,9 @@ async function detectSource(url) {
   // antworten mit einer Captcha-Seite. Das ist kein unbekannter Shop-Typ, sondern eine
   // bewusste Sperre des Betreibers – die Meldung soll das auch so sagen.
   if (blocked) throw new Error(host + ' sperrt automatische Abrufe (' + blocked.replace(/^.*?: /, '') + '). Dieser Shop lässt sich nicht überwachen.');
+  // War der Laden schlicht nicht erreichbar, ist das kein unbekannter Shop-Typ.
+  // Das zu verwechseln kostet nur Sucherei: "522" heisst, der Shop ist gerade weg.
+  if (down) throw new Error(host + ' war nicht erreichbar (' + down.replace(/^.*?: /, '') + ') – bitte später nochmal versuchen');
   throw new Error('Shop-Typ nicht erkannt (unterstützt: Shopify, WooCommerce, Shopware, PrestaShop, ePages, CS-Cart, SumUp, JSON-LD, wog.ch)');
 }
 
@@ -1558,7 +1653,7 @@ async function probeLink(raw) {
   try { u = new URL(raw.includes('://') ? raw : 'https://' + raw); } catch (e) { throw new Error('keine gültige URL'); }
   if (!/^https?:$/.test(u.protocol)) throw new Error('keine gültige URL');
   const host = u.hostname.replace(/^www\./, '');
-  const shop = host.replace(/\.(ch|com|de|eu|net|shop|store)$/, '');
+  const shop = host.replace(/\.(ch|com|de|eu|net|shop|store|site|li|at|io|online)$/, '');
   const path = decodeURIComponent(u.pathname).replace(/\/+$/, '');
   const tag = (list, type, name, extra) => list.map((x) => Object.assign({ type, shop: name, title: x.t, price: x.p, a: x.a, img: x.i, url: x.u, item: Object.assign({}, extra, x.vid ? { vid: x.vid } : {}) }, {}));
 
@@ -1618,6 +1713,14 @@ async function probeLink(raw) {
     const list = csItems(csHtml, u.origin).slice(0, 12);
     return { kind: 'collection', shop: det.name, source: { url: det.url },
       items: list.map((x) => ({ type: 'cscart', shop: name, title: x.t, price: x.p, a: x.a, img: x.i, url: x.u, item: { pid: x.id } })) };
+  }
+
+  if (det && det.type === 'nosama') {
+    const nHtml = det.html || (await getHtml(det.url)).html;
+    const name = det.shopName || shop;
+    const list = nosamaItems(nHtml, det.url).slice(0, 12);
+    return { kind: 'collection', shop: name, source: { url: det.url },
+      items: list.map((x) => ({ type: 'nosama', shop: name, title: x.t, price: x.p, a: x.a, img: x.i, url: x.u, item: { pid: x.id, url: x.u } })) };
   }
 
   if (det && det.type === 'wix') {
