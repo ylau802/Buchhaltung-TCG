@@ -31,6 +31,7 @@
  * Preisänderungen, ausverkauft -> wieder verfügbar.
  *   GET    /news                -> { sources, events, lastRun, lastError, push }
  *   POST   /news/check          Body { ids? }  -> Prüfrunde sofort (ohne ids: volle Runde wie der Cron)
+ *   GET    /news/find?q=…       -> Artikel aller Quellen durchsuchen
  *   POST   /news/sources        Body { urls:[…≤8], filter }  -> Quellen hinzufügen (Typ wird erkannt)
  *   PUT    /news/sources/<id>   Body { name?, off?, filter? }
  *   DELETE /news/sources/<id>
@@ -78,6 +79,7 @@ const COOL_MAX = 6 * 60 * 60 * 1000;      // laenger als sechs Stunden warten wi
 const HOST_PAGES = 4;                // so viele Seiten je Shop und Lauf, mehr nicht
 const HOST_PAUSE = 2000;             // Pause zwischen zwei Anfragen an denselben Shop
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const CAT_MAX = 500;        // so viele Artikel je Quelle wandern in den Suchkatalog
 const EVENTS_KEEP = 500;
 // Pro Cron-Lauf: Workers-Limit sind 50 Anfragen; das Datenbudget hält die CPU-Zeit klein (Free-Tarif).
 const RUN_SUBREQ = 40;
@@ -2147,7 +2149,15 @@ async function runWatch(env, only) {
     if (st.coolN) delete st.coolN;
     if (s.item && r.list[0]) st.cur = { p: r.list[0].p, a: r.list[0].a };
     if (r.cat && r.cat !== st.sw) st.sw = r.cat;
-    commits.push([s.id, d.next, st, d.events.length]);
+    // Katalog fuer die Suche: was diese Quelle gerade fuehrt, mit allem, was die
+    // Trefferliste zeigen muss. Liegt im selben KV-Eintrag wie der Rest des
+    // Zustands, kostet also keinen zusaetzlichen Schreibvorgang.
+    const cat = {
+      s: s.shop || s.name, at: now,
+      l: r.list.slice(0, CAT_MAX).map((x) => ({ id: x.id, t: x.t, p: x.p, a: x.a, u: x.u, i: x.i, g: x.g,
+        l: langOf(x.t, x.u, s.url) || undefined })),
+    };
+    commits.push([s.id, d.next, st, d.events.length, cat]);
     events.push(...d.events);
   }
 
@@ -2159,7 +2169,9 @@ async function runWatch(env, only) {
   if (events.length) {
     try { await sendPush(env, events, false); } catch (e) { pushErr = e.message; }
   }
-  for (const [id, next, st, n] of commits) {
+  if (!state.cat) state.cat = {};
+  for (const [id, next, st, n, cat] of commits) {
+    if (cat) state.cat[id] = cat;   // auch wenn der Push haengt: der Katalog stimmt
     if (pushErr && n) { st.lastError = 'Push fehlgeschlagen, neuer Versuch folgt'; state.src[id] = st; continue; }
     state.snap[id] = next; state.src[id] = st;
   }
@@ -2171,6 +2183,7 @@ async function runWatch(env, only) {
     state.lastError = pushErr;
     const ids = new Set(cfg.sources.map((s) => s.id));
     for (const k of Object.keys(state.snap)) if (!ids.has(k)) { delete state.snap[k]; delete state.src[k]; }
+    for (const k of Object.keys(state.cat || {})) if (!ids.has(k)) delete state.cat[k];
   }
   await env.DB.put(STATE_KEY, JSON.stringify(state));
   return { cfg, state };
@@ -2191,6 +2204,38 @@ async function handleNews(request, env, url, tokenHash) {
   const path = url.pathname, m = request.method;
 
   if (path === '/news' && m === 'GET') return view(await readCfg(env), await readState(env));
+  // Suche ueber alles, was die Quellen zuletzt gefuehrt haben. Jedes Wort der
+  // Anfrage muss vorkommen, Gross- und Kleinschreibung egal.
+  if (path === '/news/find' && m === 'GET') {
+    const q = (url.searchParams.get('q') || '').trim().toLowerCase();
+    if (q.length < 2) return json({ q, hits: [], shops: 0, searched: 0 });
+    // Set-Nummern schreibt jeder Laden anders: EB02, EB-02, EB 02. Darum wird auf
+    // beiden Seiten alles weggelassen, was kein Buchstabe und keine Ziffer ist,
+    // und Akzente werden eingeebnet (pokemon findet Pok\u00e9mon).
+    const norm = (x) => x.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '');
+    const words = q.split(/\s+/).map(norm).filter(Boolean).slice(0, 6);
+    if (!words.length) return json({ q, hits: [], shops: 0, searched: 0 });
+    const st = await readState(env);
+    const cfg = await readCfg(env);
+    const names = new Map(cfg.sources.map((s) => [s.id, s.name]));
+    const hits = [];
+    let searched = 0;
+    for (const [id, c] of Object.entries(st.cat || {})) {
+      if (!c || !Array.isArray(c.l)) continue;
+      searched += c.l.length;
+      for (const x of c.l) {
+        const hay = norm(x.t + ' ' + (x.u || ''));
+        if (words.every((w) => hay.includes(w))) {
+          hits.push(Object.assign({}, x, { s: c.s, src: names.get(id) || c.s, at: c.at }));
+        }
+      }
+    }
+    // Verfuegbares zuerst, dann der guenstigste Preis - so liest sich das wie ein
+    // Preisvergleich und nicht wie eine Zufallsliste.
+    hits.sort((a, b) => (b.a || 0) - (a.a || 0) || (a.p == null ? 1e9 : a.p) - (b.p == null ? 1e9 : b.p));
+    return json({ q, searched, shops: new Set(hits.map((h) => h.s)).size, hits: hits.slice(0, 200) });
+  }
+
   if (path === '/news/check' && m === 'POST') {
     let only = null;
     try { const b = await request.json(); if (b && Array.isArray(b.ids)) only = b.ids.map(String).slice(0, 8); } catch (e) { /* ohne Body: volle Runde */ }

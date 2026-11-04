@@ -799,6 +799,7 @@ const NAV=[
   ['laufende_kosten','Laufende Kosten','M3 6h18M3 12h18M3 18h12'],
   ['lager','Lager','M3 7l9-4 9 4-9 4-9-4zM3 7v10l9 4 9-4V7'],
   ['news','News','M4 5h13a2 2 0 012 2v12H6a2 2 0 01-2-2V5zM19 9h2v8a2 2 0 01-2 2M8 9h7M8 13h7'],
+  ['find','Suche','M11 18a7 7 0 110-14 7 7 0 010 14zM21 21l-4.3-4.3',true],
 ];
 function renderNav(){
   $('#nav').innerHTML=NAV.map(([id,label,d,sub])=>{
@@ -844,10 +845,12 @@ function draw(){
   if(route==='overview') v.innerHTML=viewOverview();
   else if(route==='lager') v.innerHTML=viewLager();
   else if(route==='news') v.innerHTML=viewNews();
+  else if(route==='find') v.innerHTML=viewFind();
   else v.innerHTML=viewLedger(route);
   wire();
   if(route==='overview') drawChart();
   if(route==='news') wireNews();
+  if(route==='find') wireFind();
 }
 
 /* ---------- Overview ---------- */
@@ -1258,6 +1261,56 @@ function viewLager(){
   </table></div>
   <p class="chart-hint" style="margin-top:10px">Ø EK/Stk = gesamte Einkaufskosten (brutto) einer SKU geteilt durch die gesamte eingekaufte Menge.
   Warenwert und Rohertrag verwenden diesen Durchschnitt. Bei negativem Bestand stimmen Ein- oder Ausgänge nicht überein.</p>`;
+}
+
+/* ---------- Suche über alle Quellen ---------- */
+// Der Worker fuehrt mit, was jede Quelle zuletzt gefuehrt hat; hier wird darin
+// gesucht. Kein Abruf bei den Shops, die Antwort kommt aus dem Speicher.
+const find={q:'',busy:false,res:null,err:''};
+async function runFind(){
+  const q=find.q.trim();
+  if(q.length<2){ find.res=null; find.err=''; draw(); return; }
+  find.busy=true; find.err=''; draw();
+  try{ find.res=await newsCall('/find?q='+encodeURIComponent(q)); }
+  catch(e){ find.err=e.message||'Fehler'; find.res=null; }
+  find.busy=false;
+  if(route==='find'){ draw(); const el=$('#fQ'); if(el){el.focus();el.setSelectionRange(el.value.length,el.value.length);} }
+}
+function viewFind(){
+  const r=find.res;
+  const hits=(r&&r.hits)||[];
+  const stand=hits.length?hits.map(h=>h.at).sort().slice(-1)[0]:null;
+  return `<div class="head"><div><h1>Suche</h1>
+    <p class="sub">Durchsucht alle Artikel, die deine Quellen zuletzt geführt haben – ohne die Shops anzufragen.</p></div></div>
+  ${find.err?`<div class="banner warn"><span><b>Suche nicht möglich:</b> ${esc(find.err)}</span></div>`:''}
+  <div class="toolbar">
+    <div class="field" style="flex:1;min-width:220px"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4-4"/></svg>
+      <input type="search" id="fQ" placeholder="Set-Nummer oder Stichwort, z. B. EB02" value="${esc(find.q)}"
+        autocapitalize="none" autocorrect="off" spellcheck="false" enterkeyhint="search"></div>
+    <button class="btn sm" id="fGo" ${find.busy?'disabled':''}>${find.busy?'Suche…':'Suchen'}</button>
+    <span class="count" style="margin-left:auto">${r?`${hits.length} Treffer bei ${r.shops} ${r.shops===1?'Quelle':'Quellen'} · ${r.searched} Artikel durchsucht${stand?' · Stand '+ago(stand):''}`:''}</span>
+  </div>
+  ${!r?`<div class="empty">Tippe eine Set-Nummer oder ein Stichwort ein. <span class="count">EB02 findet auch EB-02.</span></div>`
+   :!hits.length?`<div class="empty">Nichts gefunden für „${esc(find.q)}“.<br><span class="count">Gesucht wird nur in dem, was deine Quellen führen – was kein Shop gelistet hat, steht auch hier nicht.</span></div>`
+   :`<div class="tbl-wrap"><table>
+    <thead><tr><th>Produkt</th><th>Quelle</th><th class="n">Preis</th><th>Status</th><th></th></tr></thead>
+    <tbody>${hits.map(h=>`<tr>
+      <td class="cell-wrap" data-l="" style="min-width:260px"><div style="display:flex;align-items:center;gap:10px">
+        ${h.i?`<img src="${esc(h.i)}" alt="" loading="lazy" style="width:36px;height:36px;object-fit:contain;border-radius:6px;flex:none;background:#fff;padding:2px">`:''}
+        <div><a href="${esc(h.u)}" target="_blank" rel="noopener" style="color:var(--ink);font-weight:500;text-decoration:none">${esc(h.t)}</a>
+          <div style="margin-top:2px">${h.g?`<span class="chip ${h.g==='Pokémon'?'c-pk':''}">${esc(h.g)}</span>`:''}${h.l?` <span class="chip c-lang" title="${esc(NEWS_LANG[h.l]||h.l)}">${esc(h.l)}</span>`:''}</div></div></div></td>
+      <td data-l="Quelle" class="cell-wrap"><span class="chip">${esc(h.src||h.s)}</span></td>
+      <td data-l="Preis" class="num"><span>${h.p==null?'Preis folgt':CHF(h.p)}</span></td>
+      <td data-l="Status"><span><span class="tag-dot" style="background:${h.a?'var(--pos)':'var(--faint)'}"></span>${h.a?'verfügbar':'ausverkauft'}</span></td>
+      <td><a class="btn ghost sm" href="${esc(h.u)}" target="_blank" rel="noopener">Öffnen ↗</a></td>
+    </tr>`).join('')}</tbody></table></div>`}
+  <p class="chart-hint">Die Liste stammt aus dem letzten Durchgang je Quelle, nicht aus einem frischen Abruf. Eine Quelle, die gerade pausiert oder gesperrt ist, fehlt hier.</p>`;
+}
+function wireFind(){
+  const q=$('#fQ'), go=$('#fGo');
+  if(q){ q.oninput=debounce(()=>{ find.q=q.value; runFind(); },400);
+    q.onkeydown=e=>{ if(e.key==='Enter'){ find.q=q.value; runFind(); } }; }
+  if(go) go.onclick=()=>{ const el=$('#fQ'); find.q=el?el.value:find.q; runFind(); };
 }
 
 /* ---------- News (Shop-Monitor, läuft im Worker) ---------- */
