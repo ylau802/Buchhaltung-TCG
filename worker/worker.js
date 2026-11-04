@@ -26,7 +26,7 @@
  *   Vault (siehe oben) lehnt /files jede Anfrage ab.
  *
  * News-Monitor: ein Cron-Trigger (alle 5 Min.) prüft reihum die in der App eingetragenen
- * Shops (Shopify, WooCommerce, ePages, CS-Cart und wog.ch), filtert auf Pokémon / One Piece / Dragon Ball,
+ * Shops (Shopify, WooCommerce, ePages, CS-Cart, SumUp und wog.ch), filtert auf Pokémon / One Piece / Dragon Ball,
  * vergleicht mit dem letzten Stand und meldet per Mail (Resend-API): neue Produkte,
  * Preisänderungen, ausverkauft -> wieder verfügbar.
  *   GET    /news                -> { sources, events, lastRun, lastError, mail }
@@ -431,8 +431,104 @@ function csFromHtml(html) {
   return { shop: decodeEntities(site), name: stripTags((html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/) || [])[1]) };
 }
 
-const fetchSource = (src) => (src.item ? fetchItem(src).then((r) => { r.list.forEach((x) => { x.id = 'x'; }); return r; }) : src.type === 'wog' ? fetchWog(src) : src.type === 'woocommerce' ? fetchWoo(src) : src.type === 'epages' ? fetchEpages(src) : src.type === 'cscart' ? fetchCs(src) : fetchShopify(src));
-const srcKey = (s) => (s.item ? 'item:' + new URL(s.url).origin + '|' + (s.item.handle || s.item.slug || s.item.pid) + '|' + (s.item.vid || '') : s.type === 'wog' ? 'wog' : s.type === 'woocommerce' ? wooApi(s) + '#' + (s.cat || '') : s.type === 'epages' ? epagesApi(s) + '#' + (s.cat || '') : s.type === 'cscart' ? csClean(s.url) : shopifyApi(s));
+// SumUp Online Store (z. B. metagames.ch): Next.js-Shop, die Liste steht fertig
+// im HTML. Jede Karte ist ein <a data-analytics="product-list-item"> mit id,
+// Name, Link, Bild und Preis; "Ausverkauft" haengt als Label in der Karte.
+// 16 Produkte je Seite, darum wird die Liste nach "Neuste zuerst" sortiert.
+const SU_MAX_PAGES = 3;
+const isSumUpList = (html) => /data-analytics="product-list-item"/.test(html);
+const isSumUpProduct = (html) => /data-selector="os-theme-product-title"/.test(html);
+
+const suPrice = (s) => {
+  const m = String(s || '').replace(/\u00a0/g, ' ').match(/([\d'’.,]+)\s*$/);
+  if (!m) return null;
+  const n = parseFloat(m[1].replace(/['’]/g, '').replace(',', '.'));
+  return n > 0 ? n : null;
+};
+
+function suItems(html) {
+  const out = [];
+  const cards = html.split('<a data-analytics="product-list-item"');
+  for (let i = 1; i < cards.length; i++) {
+    const e = cards[i].indexOf('</a>');
+    const c = cards[i].slice(0, e > 0 ? e : 4000);
+    const m = (re) => { const x = c.match(re); return x ? x[1] : ''; };
+    const id = m(/data-item-id="([^"]+)"/);
+    const t = decodeEntities(m(/data-item-name="([^"]*)"/));
+    const u = m(/href="([^"]+)"/);
+    if (!id || !t || !u) continue;
+    out.push({
+      id, t,
+      p: suPrice(m(/os-theme-product-list-price-regular"[^>]*>([^<]*)</)),
+      a: c.includes('product-sold-out-label') ? 0 : 1,
+      u, i: m(/<img[^>]+src="(https:\/\/images\.sumup\.com\/[^"]+)"/),
+      g: franchiseOf(t),
+    });
+  }
+  return out;
+}
+
+// Seite 1 ohne page-Parameter; die Sortierung wird erzwungen, sonst steht die
+// Liste alphabetisch und ein News-Monitor sieht nie etwas Neues.
+function suPageUrl(raw, page) {
+  const u = new URL(raw);
+  if (!u.searchParams.get('sortField')) {
+    u.searchParams.set('sortField', 'createdAt');
+    u.searchParams.set('sortDirection', 'desc');
+  }
+  if (page > 1) u.searchParams.set('page', String(page)); else u.searchParams.delete('page');
+  return u.toString();
+}
+
+async function fetchSumup(src) {
+  const out = [], seen = new Set();
+  let pages = 0, bytes = 0, truncated = false, more = true;
+  for (let page = 1; page <= SU_MAX_PAGES && more; page++) {
+    const { html, bytes: b } = await getHtml(suPageUrl(src.url, page));
+    pages++; bytes += b;
+    const list = suItems(html);
+    if (!list.length) {
+      if (page === 1) throw new Error(new URL(src.url).host + ': keine Produktliste gefunden');
+      break;
+    }
+    for (const it of list) {
+      if (seen.has(it.id)) continue;
+      seen.add(it.id);
+      if (passes(src, it.t + ' ' + it.u)) out.push(it);
+    }
+    more = /rel="next"/.test(html);
+    if (more && page === SU_MAX_PAGES) truncated = true;
+  }
+  return { list: out, pages, bytes, truncated };
+}
+
+// Produktseite: SumUp liefert dort JSON-LD (Product + Offer) – damit stimmen
+// Preis und Verfuegbarkeit auch dann, wenn unten Empfehlungen stehen.
+function suProduct(html, url) {
+  let prod = null;
+  for (const b of html.match(/<script[^>]*ld\+json[^>]*>[\s\S]*?<\/script>/g) || []) {
+    const body = b.replace(/^[\s\S]*?>/, '').replace(/<\/script>$/, '');
+    let d; try { d = JSON.parse(body); } catch (e) { continue; }
+    const nodes = Array.isArray(d['@graph']) ? d['@graph'] : [d];
+    const p = nodes.find((x) => x && x['@type'] === 'Product');
+    if (p) { prod = p; break; }
+  }
+  if (!prod || !prod.name) throw new Error('Produktseite nicht lesbar');
+  const off = Array.isArray(prod.offers) ? prod.offers[0] : prod.offers;
+  const price = off ? parseFloat(off.price) : NaN;
+  const id = String(prod.productID || prod['@id'] || url);
+  return {
+    id, pid: id, t: decodeEntities(prod.name),
+    p: price > 0 ? price : null,
+    a: off && /OutOfStock|SoldOut|Discontinued|BackOrder/i.test(String(off.availability || '')) ? 0 : 1,
+    u: prod.url || url,
+    i: Array.isArray(prod.image) ? prod.image[0] : (prod.image || ''),
+    g: franchiseOf(prod.name + ' ' + (prod.category || '')),
+  };
+}
+
+const fetchSource = (src) => (src.item ? fetchItem(src).then((r) => { r.list.forEach((x) => { x.id = 'x'; }); return r; }) : src.type === 'wog' ? fetchWog(src) : src.type === 'woocommerce' ? fetchWoo(src) : src.type === 'epages' ? fetchEpages(src) : src.type === 'cscart' ? fetchCs(src) : src.type === 'sumup' ? fetchSumup(src) : fetchShopify(src));
+const srcKey = (s) => (s.item ? 'item:' + new URL(s.url).origin + '|' + (s.item.handle || s.item.slug || s.item.pid) + '|' + (s.item.vid || '') : s.type === 'wog' ? 'wog' : s.type === 'woocommerce' ? wooApi(s) + '#' + (s.cat || '') : s.type === 'epages' ? epagesApi(s) + '#' + (s.cat || '') : s.type === 'cscart' ? csClean(s.url) : s.type === 'sumup' ? suPageUrl(s.url, 1) : shopifyApi(s));
 
 
 // Shop-Typ erkennen (wog.ch, Shopify, WooCommerce) und einen lesbaren Namen bilden.
@@ -477,8 +573,13 @@ async function detectSource(url) {
       // html/shopName nur fuer probeLink; gespeichert werden nur id/name/url/type/fr/cat
       return { type: 'cscart', url: clean, name: cs.name ? name + ' · ' + cs.name : name, shopName: name, html };
     }
+    if (isSumUpList(html) || isSumUpProduct(html)) {
+      const site = decodeEntities((html.match(/og:site_name" content="([^"]*)"/) || [])[1] || '') || shop;
+      // Query behalten: darin steckt die Sortierung „Neuste zuerst“
+      return { type: 'sumup', url: clean + (u.search || ''), name: site, shopName: site, html };
+    }
   }
-  throw new Error('Shop-Typ nicht erkannt (unterstützt: Shopify, WooCommerce, ePages, CS-Cart, wog.ch)');
+  throw new Error('Shop-Typ nicht erkannt (unterstützt: Shopify, WooCommerce, ePages, CS-Cart, SumUp, wog.ch)');
 }
 
 
@@ -543,6 +644,10 @@ async function fetchItem(src) {
   if (src.type === 'cscart') {
     const { html, bytes } = await getHtml(csClean(src.url));
     return { list: [csProduct(html, src.url)], pages: 1, bytes };
+  }
+  if (src.type === 'sumup') {
+    const { html, bytes } = await getHtml(src.url);
+    return { list: [suProduct(html, src.url)], pages: 1, bytes };
   }
   const { html, bytes } = await getHtml(src.url);
   return { list: [wogItemFromHtml(html, src.url)], pages: 1, bytes };
@@ -615,6 +720,18 @@ async function probeLink(raw) {
     return { kind: 'collection', shop: det.name, source: { url: det.url },
       items: list.map((x) => ({ type: 'cscart', shop: name, title: x.t, price: x.p, a: x.a, img: x.i, url: x.u, item: { pid: x.id } })) };
   }
+
+  if (det && det.type === 'sumup') {
+    const suHtml = det.html || (await getHtml(det.url)).html;
+    const name = det.shopName || shop;
+    if (isSumUpProduct(suHtml)) {
+      const x = suProduct(suHtml, det.url);
+      return { kind: 'product', shop: name, items: tag([x], 'sumup', name, { pid: x.pid }) };
+    }
+    const list = suItems(suHtml).slice(0, 12);
+    return { kind: 'collection', shop: name, source: { url: det.url },
+      items: list.map((x) => ({ type: 'sumup', shop: name, title: x.t, price: x.p, a: x.a, img: x.i, url: x.u, item: { pid: x.id, url: x.u } })) };
+  }
   if (det && det.type === 'shopify' && !sm) {
     const { data } = await getJson(shopifyApi({ url: det.url }) + '?limit=12');
     const list = (data.products || []).map((p) => shopifyJsItems(Object.assign({ type: p.product_type, vendor: p.vendor, featured_image: p.images && p.images[0] && p.images[0].src }, p, { variants: (p.variants || []).map((v) => Object.assign({}, v, { price: v.price })) }), u.origin, null, false)[0]);
@@ -639,7 +756,7 @@ async function probeLink(raw) {
     const { data } = await getJson(epagesApi({ url: det.url }) + '?resultsPerPage=12&page=1' + (det.cat ? '&categoryId=' + det.cat : ''));
     return { kind: 'collection', shop: det.name, source: { url: det.url }, items: (data.products || []).map((p) => { const x = epagesNorm(p, u.origin); return { type: 'epages', shop: det.name, title: x.t, price: x.p, a: x.a, img: x.i, url: x.u, item: { pid: p.productId } }; }) };
   }
-  throw new Error('Weder Produkt noch Kollektion erkannt – unterstützt sind Shopify, WooCommerce, ePages, CS-Cart und wog.ch');
+  throw new Error('Weder Produkt noch Kollektion erkannt – unterstützt sind Shopify, WooCommerce, ePages, CS-Cart, SumUp und wog.ch');
 }
 
 
