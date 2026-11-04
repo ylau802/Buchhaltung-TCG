@@ -1261,7 +1261,7 @@ function viewLager(){
 }
 
 /* ---------- News (Shop-Monitor, läuft im Worker) ---------- */
-const news={data:null,loading:false,err:'',fr:'',lang:'',kind:'',src:'',q:'',showSrc:false,showWatch:false,urls:'',addName:'',addNameTouched:false,addFr:[],fedit:null,ren:null,cfName:'',cfKw:'',msgs:[],auto:false,chat:[],wurls:'',wbusy:false};
+const news={data:null,loading:false,bg:0,err:'',fr:'',lang:'',kind:'',src:'',q:'',showSrc:false,showWatch:false,urls:'',addName:'',addNameTouched:false,addFr:[],fedit:null,ren:null,cfName:'',cfKw:'',msgs:[],auto:false,chat:[],wurls:'',wbusy:false};
 const newsCatalog=()=>(news.data&&news.data.catalog)||['Pokémon','One Piece','Dragon Ball'];
 const NEWS_KIND={new:'Neu',price:'Preis',stock:'Wieder verfügbar'};
 // Sprache, wie der Worker sie am Artikel erkannt hat (leer = steht nirgends).
@@ -1320,7 +1320,30 @@ async function addSources(){
     if(!news.urls){ news.addName=''; news.addNameTouched=false; }
   }catch(e){ news.err=e.message||'Fehler'; }
   news.loading=false;
-  await loadNews('/check','POST'); // neue Quellen sofort einlesen (erster Lauf = nur Stand merken, keine Meldungen)
+  await loadNews();   // Liste sofort zeigen; das ist nur ein Blick in den Speicher
+  // Die neuen Quellen still im Hintergrund einlesen – nur sie, nicht alle, und ohne
+  // den Hinzufügen-Knopf zu sperren. Sonst wartet man beim nächsten Eintrag jedes Mal
+  // eine ganze Runde über sämtliche Quellen ab. (Erster Lauf = nur Stand merken.)
+  checkNew(news.msgs.filter(m=>m.ok&&m.id).map(m=>m.id));
+}
+// Prueft gezielt einzelne Quellen, ohne die Oberflaeche zu sperren.
+function checkNew(ids){
+  if(!ids.length) return;
+  news.bg++;
+  newsCall('/check','POST',{ids})
+    .then(j=>{
+      if(!j||!j.sources) return;
+      // Nur die Staende uebernehmen, nicht die ganze Liste: waehrend der Pruefung
+      // kann laengst eine weitere Quelle dazugekommen sein, die in dieser Antwort
+      // noch fehlt. Die wuerde sonst wieder aus der Anzeige fallen.
+      const st=new Map(j.sources.map(s=>[s.id,s.st]));
+      if(news.data){ news.data.sources=news.data.sources.map(s=>st.has(s.id)?Object.assign({},s,{st:st.get(s.id)}):s);
+                     news.data.events=j.events; }
+      else news.data=j;
+      news.err='';
+    })
+    .catch(()=>{})
+    .then(()=>{ news.bg--; renderNav(); if(route==='news') draw(); });
 }
 // ---- Beobachten: einzelne Produkte per Link ----
 const wKey=(url,it)=>'item:'+new URL(url).origin+'|'+(it.handle||it.slug||it.pid)+'|'+(it.vid||'');
@@ -1353,7 +1376,8 @@ async function watchWhole(ci){
   try{
     const j=await newsCall('/sources','POST',{urls:[news.chat[ci].j.source.url],fr:news.addFr});
     const r=j.results[0]; toast(r.ok?`„${r.name}“ wird jetzt überwacht`:r.error);
-    await loadNews('/check','POST');
+    await loadNews();
+    checkNew(r.ok&&r.id?[r.id]:[]);
   }catch(e){ toast(e.message||'Fehler'); }
 }
 const statusDot=a=>`<span class="tag-dot" style="background:${a?'var(--pos)':'var(--faint)'}"></span>${a?'verfügbar':'ausverkauft'}`;
@@ -1467,7 +1491,7 @@ function viewNews(){
   const d=news.data;
   if(!d&&!news.err) setTimeout(()=>loadNews(),0);
   if(!news.ps.checked){ news.ps.checked=true; setTimeout(pushRefresh,0); }
-  if(d&&!news.auto&&d.sources.some(s=>!s.off&&!s.st)){ news.auto=true; setTimeout(()=>loadNews('/check','POST'),0); } // noch nie geprüfte Quellen
+  if(d&&!news.auto&&!news.bg&&d.sources.some(s=>!s.off&&!s.st)){ news.auto=true; setTimeout(()=>loadNews('/check','POST'),0); } // noch nie geprüfte Quellen
   const ALL=(d&&d.sources)||[];
   // Quellen und beobachtete Produkte alphabetisch, damit die Liste nicht in
   // Hinzufüge-Reihenfolge steht und sich beim Umbenennen neu sortiert.

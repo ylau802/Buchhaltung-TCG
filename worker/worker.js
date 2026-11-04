@@ -30,7 +30,7 @@
  * vergleicht mit dem letzten Stand und meldet per Web-Push: neue Produkte,
  * Preisänderungen, ausverkauft -> wieder verfügbar.
  *   GET    /news                -> { sources, events, lastRun, lastError, push }
- *   POST   /news/check          -> nächste Prüfrunde sofort ausführen (wie der Cron)
+ *   POST   /news/check          Body { ids? }  -> Prüfrunde sofort (ohne ids: volle Runde wie der Cron)
  *   POST   /news/sources        Body { urls:[…≤8], filter }  -> Quellen hinzufügen (Typ wird erkannt)
  *   PUT    /news/sources/<id>   Body { name?, off?, filter? }
  *   DELETE /news/sources/<id>
@@ -711,21 +711,25 @@ async function detectSource(url) {
 
   const clean = u.origin + u.pathname.replace(/\/+$/, '');
   const probe = { url: clean };
-  try {
-    const { data } = await getJson(shopifyApi(probe) + '?limit=1');
-    if (Array.isArray(data.products)) {
-      const m = u.pathname.match(/\/collections\/([^/]+)/);
-      return { type: 'shopify', url: clean, name: m && m[1] !== 'all' ? shop + ' · ' + m[1] : shop };
-    }
-  } catch (e) { /* weiter */ }
-  try {
-    const { data } = await getJson(wooApi(probe) + '/products?per_page=1');
-    if (Array.isArray(data)) {
+  // Ein Shop ist höchstens eines von beiden, also beide Schnittstellen gleichzeitig
+  // anklopfen statt zwei Rundreisen nacheinander abzuwarten. Fehler sind hier normal
+  // (wer kein Shopify ist, antwortet mit 404) und bedeuten nur: nächste Möglichkeit.
+  const miss = Symbol('kein Treffer');
+  const [sh, wo] = await Promise.all([
+    getJson(shopifyApi(probe) + '?limit=1').then((r) => r.data, () => miss),
+    getJson(wooApi(probe) + '/products?per_page=1').then((r) => r.data, () => miss),
+  ]);
+  if (sh !== miss && sh && Array.isArray(sh.products)) {
+    const m = u.pathname.match(/\/collections\/([^/]+)/);
+    return { type: 'shopify', url: clean, name: m && m[1] !== 'all' ? shop + ' · ' + m[1] : shop };
+  }
+  if (wo !== miss && Array.isArray(wo)) {
+    try {
       const cat = await wooCategoryId(probe);
       return { type: 'woocommerce', url: clean, cat: cat && cat.id, name: cat ? shop + ' · ' + cat.name : shop };
+    } catch (e) {
+      if (/Kategorie/.test(e.message)) throw e;   // sagt dem Benutzer, was zu tun ist
     }
-  } catch (e) {
-    if (/Kategorie/.test(e.message)) throw e;
   }
   // Shops ohne offene Schnittstelle: die Seite einmal holen und daraus erkennen.
   // Mit Query – bei manchen Shops steckt die Liste genau darin.
@@ -1110,12 +1114,16 @@ function describe(ev) {
 
 // Eine Prüfrunde: die am längsten ungeprüften Quellen, solange das Budget (Anfragen/Datenmenge)
 // reicht. Neue Quellen: erster Lauf nur Schnappschuss, keine Ereignisse.
-async function runWatch(env) {
+// only = Liste von Quellen-IDs: dann wird nur die eingelesen. Das braucht die App
+// gleich nach dem Hinzufügen – sonst wartet man dort auf eine ganze Runde über
+// alle Quellen, nur um eine einzige neue zu sehen.
+async function runWatch(env, only) {
   const now = new Date().toISOString();
   const cfg = await readCfg(env);
   const state = await readState(env);
+  const pick = only && only.length ? new Set(only) : null;
 
-  const todo = cfg.sources.filter((s) => !s.off)
+  const todo = cfg.sources.filter((s) => !s.off && (!pick || pick.has(s.id)))
     .sort((a, b) => ((state.src[a.id] || {}).lastCheck || '').localeCompare((state.src[b.id] || {}).lastCheck || ''));
   const batch = [];
   let pagesLeft = RUN_SUBREQ, bytesLeft = RUN_BYTES;
@@ -1241,11 +1249,14 @@ async function runWatch(env) {
     state.snap[id] = next; state.src[id] = st;
   }
   if (!pushErr && events.length) state.events = events.concat(state.events).slice(0, EVENTS_KEEP);
-  state.lastRun = now;
-  state.lastError = pushErr;
-  // Gelöschte Quellen aufräumen
-  const ids = new Set(cfg.sources.map((s) => s.id));
-  for (const k of Object.keys(state.snap)) if (!ids.has(k)) { delete state.snap[k]; delete state.src[k]; }
+  // Nur bei einer vollen Runde: "letzter Lauf" und das Aufräumen gelöschter Quellen.
+  // Eine gezielte Prüfung einzelner Quellen sagt über die übrigen nichts aus.
+  if (!pick) {
+    state.lastRun = now;
+    state.lastError = pushErr;
+    const ids = new Set(cfg.sources.map((s) => s.id));
+    for (const k of Object.keys(state.snap)) if (!ids.has(k)) { delete state.snap[k]; delete state.src[k]; }
+  }
   await env.DB.put(STATE_KEY, JSON.stringify(state));
   return { cfg, state };
 }
@@ -1265,7 +1276,12 @@ async function handleNews(request, env, url, tokenHash) {
   const path = url.pathname, m = request.method;
 
   if (path === '/news' && m === 'GET') return view(await readCfg(env), await readState(env));
-  if (path === '/news/check' && m === 'POST') { const r = await runWatch(env); return view(r.cfg, r.state); }
+  if (path === '/news/check' && m === 'POST') {
+    let only = null;
+    try { const b = await request.json(); if (b && Array.isArray(b.ids)) only = b.ids.map(String).slice(0, 8); } catch (e) { /* ohne Body: volle Runde */ }
+    const r = await runWatch(env, only);
+    return view(r.cfg, r.state);
+  }
 
   if (path === '/news/push/key' && m === 'GET') return json({ key: (await getVapid(env)).pub });
   if (path === '/news/push' && m === 'POST') {
@@ -1391,7 +1407,7 @@ async function handleNews(request, env, url, tokenHash) {
         if (CATALOG.some(([, re]) => re.test(readable))) fr = [];
         const name = names[k] || d.name;
         cfg.sources.push(Object.assign({ id, name, url: d.url, type: d.type, fr }, d.cat ? { cat: d.cat } : {}));
-        results.push({ url: raw, ok: true, name, type: d.type, fr });
+        results.push({ url: raw, ok: true, id, name, type: d.type, fr });
       } catch (e) { results.push({ url: raw, ok: false, error: e.message }); }
     }
     await env.DB.put(CFG_KEY, JSON.stringify(cfg));
