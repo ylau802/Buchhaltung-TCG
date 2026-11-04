@@ -165,7 +165,7 @@ const chf = (v) => (v == null ? 'Preis folgt' : 'CHF ' + Number(v).toFixed(2));
 // Franchise-Katalog: eingebaute + eigene (cfg.customFr = [{ name, kw: [Stichwörter] }]).
 // Pro Quelle wählt man, welche gemeldet werden (src.fr); leer = alle Produkte.
 const BUILTIN_FR = [
-  ['Pokémon', /pok[eé]mon/i], ['One Piece', /one[\s\-_]*piece/i], ['Dragon Ball', /dragon[\s\-_]*ball/i],
+  ['Pokémon', /pok[eé]mon|\bpkm\b/i], ['One Piece', /one[\s\-_]*piece/i], ['Dragon Ball', /dragon[\s\-_]*ball/i],
   ['Riftbound', /riftbound/i], ['Naruto', /naruto/i], ['Cyberpunk', /cyberpunk/i],
   ['Magic', /\bmagic\b|\bmtg\b/i], ['Yu-Gi-Oh!', /yu[\s\-_]*gi[\s\-_]*oh/i], ['Lorcana', /lorcana/i], ['Digimon', /digimon/i],
   ['Star Wars', /star[\s\-_]*wars/i], ['Flesh and Blood', /flesh[\s\-_]*(and|&)[\s\-_]*blood/i], ['Gundam', /gundam/i], ['Union Arena', /union[\s\-_]*arena/i],
@@ -180,12 +180,13 @@ const franchiseOf = (hay) => (CATALOG.find(([, re]) => re.test(hay)) || [''])[0]
 // ("…-booster-box-franzoesisch"). Kürzel zählen nur in Grossbuchstaben, sonst
 // gäbe das "de" in einer Shop-Adresse oder das französische "de" in einem Titel
 // eine falsche Sprache.
+// Einzelbuchstaben wie "-D-" zählen nur freistehend, sonst trifft es "Mega-D-Luxe".
 const LANGS = [
-  ['EN', /englisch|english|anglais|inglese/i, /(^|[^A-Za-z0-9])(EN|ENG)([^A-Za-z0-9]|$)/],
-  ['DE', /deutsch|german|allemand|tedesco/i, /(^|[^A-Za-z0-9])(DE|GER|DEU)([^A-Za-z0-9]|$)/],
-  ['FR', /franz(ö|oe)sisch|french|fran(ç|c)ais/i, /(^|[^A-Za-z0-9])(FR|FRA)([^A-Za-z0-9]|$)/],
-  ['IT', /italienisch|italian|italiano/i, /(^|[^A-Za-z0-9])(IT|ITA)([^A-Za-z0-9]|$)/],
-  ['JP', /japanisch|japanese|japonais|japan\b/i, /(^|[^A-Za-z0-9])(JP|JPN|JAP)([^A-Za-z0-9]|$)/],
+  ['EN', /englisch|english|anglais|inglese/i, /(^|[^A-Za-z0-9])(EN|ENG)([^A-Za-z0-9]|$)|(?:^|\s)-E-(?=\s|$)/],
+  ['DE', /deutsch|german|allemand|tedesco/i, /(^|[^A-Za-z0-9])(DE|GER|DEU)([^A-Za-z0-9]|$)|(?:^|\s)-D-(?=\s|$)/],
+  ['FR', /franz(ö|oe)sisch|french|fran(ç|c)ais/i, /(^|[^A-Za-z0-9])(FR|FRA)([^A-Za-z0-9]|$)|(?:^|\s)-F-(?=\s|$)/],
+  ['IT', /italienisch|italian|italiano/i, /(^|[^A-Za-z0-9])(IT|ITA)([^A-Za-z0-9]|$)|(?:^|\s)-I-(?=\s|$)/],
+  ['JP', /japanisch|japanese|japonais|japan\b/i, /(^|[^A-Za-z0-9])(JP|JPN|JAP)([^A-Za-z0-9]|$)|(?:^|\s)-J-(?=\s|$)/],
   ['CN', /chinesisch|chinese/i, /(^|[^A-Za-z0-9])(CN|CHS|CHT)([^A-Za-z0-9]|$)/],
   ['KR', /koreanisch|korean/i, /(^|[^A-Za-z0-9])(KR|KOR)([^A-Za-z0-9]|$)/],
   ['ES', /spanisch|spanish|espa(ñ|n)ol/i, /(^|[^A-Za-z0-9])(ES|ESP)([^A-Za-z0-9]|$)/],
@@ -304,8 +305,10 @@ async function fetchWog(src) {
 
 // WooCommerce (öffentliche Store-API): Kategorie-URL -> Kategorie-ID, dann Produkte seitenweise.
 const wooApi = (src) => new URL(src.url).origin + '/wp-json/wc/store/v1';
-const decodeEntities = (t) => String(t || '').replace(/&#(\d+);/g, (_, n) => String.fromCharCode(+n))
-  .replace(/&(amp|lt|gt|quot|nbsp);/g, (_, k) => ({ amp: '&', lt: '<', gt: '>', quot: '"', nbsp: ' ' }[k]));
+const decodeEntities = (t) => String(t || '')
+  .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCharCode(parseInt(n, 16)))   // &#xE9; = é
+  .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(+n))
+  .replace(/&(amp|lt|gt|quot|nbsp|apos);/g, (_, k) => ({ amp: '&', lt: '<', gt: '>', quot: '"', nbsp: ' ', apos: "'" }[k]));
 const trimSlash = (p) => decodeURIComponent(p).replace(/\/+$/, '');
 
 async function wooCategoryId(src) {
@@ -1019,14 +1022,154 @@ function e6Product(html, url) {
   };
 }
 
+// manor.ch: eine Next.js-Seite, die ihre Produkte fertig mitliefert - im Zustand
+// __NEXT_DATA__ unter initialApolloState, je Artikel ein Eintrag "IndexedProduct".
+// Name, Preis, Lagerstand, Bild und Link stehen dort sauber beieinander.
+// 48 Artikel je Seite, geblaettert wird mit ?page=N (Seite 1 ohne den Parameter).
+const MANOR_PER_PAGE = 48;
+function manorState(html) {
+  const m = html.match(/__NEXT_DATA__[^>]*>([\s\S]*?)<\/script>/);
+  if (!m) return null;
+  try { return JSON.parse(m[1]); } catch (e) { return null; }
+}
+function manorProducts(html) {
+  const j = manorState(html);
+  const ap = j && j.props && j.props.pageProps && j.props.pageProps.initialApolloState;
+  if (!ap) return null;
+  const out = Object.keys(ap).filter((k) => k.startsWith('IndexedProduct:')).map((k) => ap[k]);
+  return out.length ? out : null;
+}
+const isManor = (html) => !!manorProducts(html);
+
+function manorItems(html) {
+  const out = [];
+  for (const p of manorProducts(html) || []) {
+    const first = (p.titles && p.titles.first) || p.brandName || '';
+    const base = p.name || (p.titles && p.titles.third) || '';
+    if (!base || !p.link) continue;
+    // Der Name allein heisst manchmal nur "Sammelkartenbox"; die Marke steht daneben.
+    const t = first && !base.toLowerCase().includes(first.toLowerCase()) ? first + ' \u00b7 ' + base : base;
+    const st = (p.stock && p.stock.status) || '';
+    out.push({
+      id: String(p.code || p.id),
+      t,
+      p: p.priceValue && p.priceValue.amount > 0 ? p.priceValue.amount : null,
+      a: /OUT_OF_STOCK|SOLD_OUT|NOT_AVAILABLE/i.test(st) ? 0 : 1,
+      u: p.link,
+      i: (p.imageUrls && (p.imageUrls.desktop || p.imageUrls.mobile)) || '',
+      g: franchiseOf(t + ' ' + (p.brandName || '') + ' ' + p.link),
+      hay: t + ' ' + (p.brandName || '') + ' ' + p.link,
+    });
+  }
+  return out;
+}
+
+const manorPageUrl = (base, n) => {
+  const u = new URL(base);
+  if (n > 1) u.searchParams.set('page', String(n)); else u.searchParams.delete('page');
+  return u.toString();
+};
+
+async function fetchManor(src, max) {
+  const out = [], seen = new Set();
+  let pages = 0, bytes = 0, truncated = false;
+  for (let page = 1; page <= (max || MAX_PAGES); page++) {
+    if (pages) await sleep(HOST_PAUSE);
+    const { html, bytes: b } = await getHtml(manorPageUrl(src.url, page));
+    pages++; bytes += b;
+    const list = manorItems(html);
+    if (!list.length) {
+      if (page === 1) throw new Error(new URL(src.url).host + ': keine Produktliste gefunden');
+      break;
+    }
+    let added = 0;
+    for (const it of list) {
+      if (seen.has(it.id)) continue;
+      seen.add(it.id); added++;
+      if (passes(src, it.hay)) { delete it.hay; out.push(it); }
+    }
+    if (!added || list.length < MANOR_PER_PAGE) break;
+    if (page === (max || MAX_PAGES)) truncated = true;
+  }
+  return { list: out, pages, bytes, truncated };
+}
+
+// Produktseite: derselbe Zustand, nur mit genau einem Eintrag.
+function manorProduct(html, url) {
+  const one = manorItems(html)[0];
+  if (!one) throw new Error('Produktseite nicht lesbar');
+  delete one.hay;
+  return Object.assign(one, { id: one.u, pid: one.u });
+}
+
+// softridge.ch: die Seite selbst ist leer, die Liste holt sich das Javascript von
+// /api/shop/products. Die vollstaendige Adresse dieser Schnittstelle steht als
+// verstecktes Feld "productsApiUrl" in der Seite - die merkt sich der Monitor beim
+// Anlegen und fragt danach nur noch die Schnittstelle. Sie sortiert von Haus aus
+// nach Erscheinungsdatum absteigend, also stehen Neuheiten vorn. 20 je Seite.
+const srApi = (html) => decodeEntities((html.match(/id="productsApiUrl"[^>]*\svalue="([^"]+)"/)
+  || html.match(/\svalue="([^"]*\/api\/shop\/products[^"]*)"/) || [])[1] || '');
+const isSoftridge = (html) => !!srApi(html);
+
+const srPageUrl = (src, n) => new URL(src.cat + '&page=' + n, src.url).toString();
+
+function srItems(j, base) {
+  const out = [];
+  for (const p of (j && j.products) || []) {
+    const t = decodeEntities(String(p.fullTitle || ''));
+    if (!t || !p.linkUrl) continue;
+    const u = new URL(p.linkUrl, base).toString();
+    out.push({
+      id: String(p.navisionId || p.id),
+      t,
+      p: p.salesPrice > 0 ? p.salesPrice : null,
+      // Grau heisst ausverkauft; blau und gelb sind Vorbestellungen mit Liefertermin,
+      // gruen ist sofort da. An den Produktseiten gegengeprueft.
+      a: p.statusColor === 'Gray' ? 0 : 1,
+      u,
+      i: p.coverUrl ? new URL(p.coverUrl, base).toString() : '',
+      g: franchiseOf(t + ' ' + (p.consoleName || '') + ' ' + u),
+      hay: t + ' ' + (p.consoleName || '') + ' ' + (p.publisherAndGenreText || '') + ' ' + u,
+    });
+  }
+  return out;
+}
+
+async function fetchSoftridge(src, max) {
+  const out = [], seen = new Set();
+  let pages = 0, bytes = 0, truncated = false;
+  for (let page = 1; page <= (max || MAX_PAGES); page++) {
+    if (pages) await sleep(HOST_PAUSE);
+    const { data, bytes: b } = await getJson(srPageUrl(src, page));
+    pages++; bytes += b;
+    const list = srItems(data, src.url);
+    if (!list.length) {
+      if (page === 1) throw new Error(new URL(src.url).host + ': keine Produktliste gefunden');
+      break;
+    }
+    for (const it of list) {
+      if (seen.has(it.id)) continue;
+      seen.add(it.id);
+      if (passes(src, it.hay)) { delete it.hay; out.push(it); }
+    }
+    if (!data.hasMore) break;
+    if (page === (max || MAX_PAGES)) truncated = true;
+  }
+  return { list: out, pages, bytes, truncated };
+}
+
 const fetchSource = (src, max) => (src.item ? fetchItem(src).then((r) => { r.list.forEach((x) => { x.id = 'x'; }); return r; }) : src.type === 'wog' ? fetchWog(src) : src.type === 'woocommerce' ? fetchWoo(src, max) : src.type === 'epages' ? fetchEpages(src, max) : src.type === 'cscart' ? fetchCs(src, max) : src.type === 'sumup' ? fetchSumup(src, max) : src.type === 'shopware' ? fetchShopware(src, max)
   : src.type === 'prestashop' ? fetchPresta(src, max)
   : src.type === 'jsonld' ? fetchJsonLd(src, max)
-  : src.type === 'epages6' ? fetchEpages6(src, max) : fetchShopify(src, max));
+  : src.type === 'epages6' ? fetchEpages6(src, max)
+  : src.type === 'manor' ? fetchManor(src, max)
+  : src.type === 'softridge' ? fetchSoftridge(src, max) : fetchShopify(src, max));
 const srcKey = (s) => (s.item ? 'item:' + new URL(s.url).origin + '|' + (s.item.handle || s.item.slug || s.item.pid) + '|' + (s.item.vid || '') : s.type === 'wog' ? 'wog' : s.type === 'woocommerce' ? wooApi(s) + '#' + (s.cat || '') : s.type === 'epages' ? epagesApi(s) + '#' + (s.cat || '') : s.type === 'cscart' ? csClean(s.url) : s.type === 'sumup' ? suPageUrl(s.url, 1) : s.type === 'shopware' ? swPageUrl(s.url, 1)
   : s.type === 'prestashop' ? psPageUrl(s.url, 1, 'p', 0)
   : s.type === 'jsonld' ? ldPageUrl(s.url, 1)
-  : s.type === 'epages6' ? e6PageUrl(s.url, 1) : shopifyApi(s));
+  : s.type === 'epages6' ? e6PageUrl(s.url, 1)
+  : s.type === 'manor' ? manorPageUrl(s.url, 1)
+  : s.type === 'softridge' ? srPageUrl(s, 1) : shopifyApi(s));
 
 
 // Shop-Typ erkennen (wog.ch, Shopify, WooCommerce) und einen lesbaren Namen bilden.
@@ -1106,6 +1249,15 @@ async function detectSource(url) {
       const site = decodeEntities((html.match(/og:site_name" content="([^"]*)"/) || [])[1] || '') || shop;
       // Query behalten: darin steckt die Sortierung „Neuste zuerst“
       return { type: 'sumup', url: withQuery, name: site, shopName: site, html };
+    }
+    if (isSoftridge(html)) {
+      const h1 = decodeEntities(stripTags((html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/) || [])[1] || ''));
+      return { type: 'softridge', url: clean, cat: srApi(html), name: h1 ? shop + ' \u00b7 ' + h1 : shop, shopName: shop, html };
+    }
+    if (isManor(html)) {
+      const h1 = decodeEntities(stripTags((html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/) || [])[1] || ''));
+      const u2 = new URL(withQuery); u2.searchParams.delete('page');
+      return { type: 'manor', url: u2.toString(), name: h1 ? shop + ' \u00b7 ' + h1 : shop, shopName: shop, html };
     }
     // Zuletzt: liefert der Shop seine Liste als JSON-LD mit? Das koennen auch
     // Laeden, deren Markup wir nicht kennen.
@@ -1208,6 +1360,10 @@ async function fetchItem(src) {
     const { html, bytes } = await getHtml(src.url);
     return { list: [e6Product(html, src.url)], pages: 1, bytes };
   }
+  if (src.type === 'manor') {
+    const { html, bytes } = await getHtml(src.url);
+    return { list: [manorProduct(html, src.url)], pages: 1, bytes };
+  }
   const { html, bytes } = await getHtml(src.url);
   return { list: [wogItemFromHtml(html, src.url)], pages: 1, bytes };
 }
@@ -1278,6 +1434,26 @@ async function probeLink(raw) {
     const list = csItems(csHtml, u.origin).slice(0, 12);
     return { kind: 'collection', shop: det.name, source: { url: det.url },
       items: list.map((x) => ({ type: 'cscart', shop: name, title: x.t, price: x.p, a: x.a, img: x.i, url: x.u, item: { pid: x.id } })) };
+  }
+
+  if (det && det.type === 'softridge') {
+    const name = det.shopName || shop;
+    const { data } = await getJson(srPageUrl({ url: det.url, cat: det.cat }, 1));
+    const list = srItems(data, det.url).slice(0, 12);
+    return { kind: 'collection', shop: name, source: { url: det.url, cat: det.cat },
+      items: list.map((x) => ({ type: 'softridge', shop: name, title: x.t, price: x.p, a: x.a, img: x.i, url: x.u, item: { pid: x.id, url: x.u } })) };
+  }
+
+  if (det && det.type === 'manor') {
+    const mHtml = det.html || (await getHtml(det.url)).html;
+    const name = det.shopName || shop;
+    const list = manorItems(mHtml);
+    if (list.length === 1) {
+      const x = manorProduct(mHtml, det.url);
+      return { kind: 'product', shop: name, items: tag([x], 'manor', name, { pid: x.pid }) };
+    }
+    return { kind: 'collection', shop: name, source: { url: det.url },
+      items: list.slice(0, 12).map((x) => ({ type: 'manor', shop: name, title: x.t, price: x.p, a: x.a, img: x.i, url: x.u, item: { pid: x.id, url: x.u } })) };
   }
 
   if (det && det.type === 'epages6') {
