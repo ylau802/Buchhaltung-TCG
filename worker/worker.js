@@ -901,14 +901,21 @@ async function sendPush(env, events, test) {
 }
 
 // ---- Vergleich: neu / Preis / wieder verfügbar ----
-function diff(src, list, prev, init, now) {
+// silentFrom: ab dieser Stelle in der Liste gilt ein unbekannter Artikel nicht als neu.
+// Gebraucht, wenn dieser Lauf tiefer gelesen hat als je zuvor: was dort auftaucht,
+// steht laengst im Laden, der Monitor hat nur nie so weit geschaut. Die Listen sind
+// nach "Neuste zuerst" sortiert, echte Neuheiten stehen also vorne.
+function diff(src, list, prev, init, now, silentFrom) {
   const next = Object.assign({}, prev);
   const events = [];
+  const limit = silentFrom == null ? Infinity : silentFrom;
+  let i = -1;
   for (const it of list) {
+    i++;
     const old = prev[it.id];
     if (init) {
       const ev = { s: src.shop || src.name, id: it.id, t: it.t, p: it.p, a: it.a, u: it.u, i: it.i, g: it.g, at: now };
-      if (!old) events.push(Object.assign({ k: 'new' }, ev));
+      if (!old) { if (i < limit) events.push(Object.assign({ k: 'new' }, ev)); }
       else {
         if (old[0] != null && it.p != null && Math.abs(old[0] - it.p) > 0.004) events.push(Object.assign({ k: 'price', o: old[0] }, ev));
         if (old[1] === 0 && it.a === 1) events.push(Object.assign({ k: 'stock' }, ev));
@@ -1020,7 +1027,12 @@ async function runWatch(env) {
       } else st.lastError = err;
       state.src[s.id] = st; continue;
     }
-    const d = diff(s, r.list, state.snap[s.id] || {}, !!st.init, now);
+    // Hat dieser Lauf mehr Seiten gelesen als je zuvor, sind die zusaetzlich
+    // gefundenen Artikel Bestand, keine Neuheiten – sie werden still uebernommen.
+    const snap = state.snap[s.id] || {};
+    const deeper = r.pages > (st.seenPages || 0);
+    const d = diff(s, r.list, snap, !!st.init, now, deeper ? Object.keys(snap).length : null);
+    st.seenPages = Math.max(st.seenPages || 0, r.pages);
     // Ein Schnelldurchlauf liest absichtlich nur die neuesten Seiten – das ist kein Fehler.
     // Gemeldet wird nur, wenn auch der volle Durchlauf nicht bis zum Ende kam.
     Object.assign(st, { lastOk: now, lastError: full && r.truncated ? 'sehr grosse Kategorie – geprüft werden die ' + r.list.length + ' neuesten Artikel' : null,
