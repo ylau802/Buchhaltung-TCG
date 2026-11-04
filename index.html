@@ -1320,7 +1320,7 @@ async function addSources(){
     if(!news.urls){ news.addName=''; news.addNameTouched=false; }
   }catch(e){ news.err=e.message||'Fehler'; }
   news.loading=false;
-  await loadNews('/check','POST'); // neue Quellen sofort einlesen (erster Lauf = nur Stand merken, keine Mail)
+  await loadNews('/check','POST'); // neue Quellen sofort einlesen (erster Lauf = nur Stand merken, keine Meldungen)
 }
 // ---- Beobachten: einzelne Produkte per Link ----
 const wKey=(url,it)=>'item:'+new URL(url).origin+'|'+(it.handle||it.slug||it.pid)+'|'+(it.vid||'');
@@ -1479,7 +1479,7 @@ function viewNews(){
   const langs=[...new Set(EV.map(e=>e.l).filter(Boolean))]
     .sort((a,b)=>String(NEWS_LANG[a]||a).localeCompare(String(NEWS_LANG[b]||b),'de'));
   const f=EV.filter(e=>(!news.kind||e.k===news.kind)&&(!news.src||e.s===news.src)&&(!news.fr||e.g===news.fr)&&(!news.lang||e.l===news.lang)&&(!q||e.t.toLowerCase().includes(q)));
-  const status=d?`Letzter Lauf ${d.lastRun?ago(d.lastRun):'noch nie'} · ${S.filter(s=>!s.off).length} Quellen · ${W.length} beobachtet · Mail ${d.mail?'<b class="pos">aktiv</b>':'<b class="neg">nicht eingerichtet</b>'} · Push ${d.push?`<b class="pos">${d.push} Gerät${d.push>1?'e':''}</b>`:'<b class="neg">aus</b>'}`:'';
+  const status=d?`Letzter Lauf ${d.lastRun?ago(d.lastRun):'noch nie'} · ${S.filter(s=>!s.off).length} Quellen · ${W.length} beobachtet · Push ${d.push?`<b class="pos">${d.push} Gerät${d.push>1?'e':''}</b>`:'<b class="neg">aus</b>'}`:'';
   const srcStatus=s=>{ const st=s.st;
     if(s.off) return '<span class="count">pausiert</span>';
     if(!st) return '<span class="count">noch nicht geprüft</span>';
@@ -1494,7 +1494,6 @@ function viewNews(){
       <button class="btn ghost sm" id="nCheck" ${news.loading?'disabled':''}><svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 10-2.3 5.7M20 4v7h-7"/></svg>${news.loading?'Prüfe…':'Jetzt prüfen'}</button>
       ${news.ps.supported&&!news.ps.sub?`<button class="btn ghost sm" id="nPushOn"><svg viewBox="0 0 24 24"><path d="M18 8a6 6 0 10-12 0c0 7-3 9-3 9h18s-3-2-3-9M13.7 21a2 2 0 01-3.4 0"/></svg>Push aktivieren</button>`:''}
       ${news.ps.sub?`<button class="btn ghost sm" id="nPushTest">Test-Push</button><button class="btn ghost sm" id="nPushOff">Push aus</button>`:''}
-      ${d&&d.mail?`<button class="btn ghost sm" id="nTest"><svg viewBox="0 0 24 24"><path d="M3 6h18v12H3zM3 7l9 7 9-7"/></svg>Testmail</button>`:''}
       <button class="btn sm" id="nWatchBtn">Beobachten (${W.length})</button>
       <button class="btn sm" id="nSrcBtn">Quellen (${S.length})</button>
     </div>
@@ -1505,7 +1504,6 @@ function viewNews(){
   ${news.ps.supported&&news.ps.perm==='denied'?`<div class="banner warn"><span><b>Benachrichtigungen sind blockiert.</b> In den Geräte-/Browser-Einstellungen für diese Seite erlauben, dann hier „Push aktivieren“.</span></div>`:''}
   ${news.err?`<div class="banner warn"><span><b>News nicht erreichbar:</b> ${esc(news.err)}</span></div>`:''}
   ${d&&d.lastError?`<div class="banner warn"><span><b>Letzter Lauf mit Fehler:</b> ${esc(d.lastError)}</span></div>`:''}
-  ${d&&!d.mail?`<div class="banner"><span>Mail-Benachrichtigung ist noch nicht eingerichtet – das Dashboard funktioniert trotzdem. Anleitung: <b>SETUP-SYNC.md → News &amp; Mail</b>.</span></div>`:''}
   ${news.showWatch&&d?`<div class="card">
     <h2>Beobachten</h2>
     <div class="cap">Einzelne Produkte (z. B. eine bestimmte Karte): Link einfügen, ich prüfe ihn und frage nach, welches Produkt genau gemeint ist. Mit dem Häkchen bestätigst du – danach gibt es eine Meldung bei <b>Preisänderung</b> und wenn es <b>wieder verfügbar</b> ist.</div>
@@ -1590,12 +1588,11 @@ function viewNews(){
       <td><a class="btn ghost sm" href="${esc(e.u)}" target="_blank" rel="noopener">Öffnen ↗</a></td>
     </tr>`).join('')||`<tr><td colspan="6"><div class="empty">${(d.events||[]).length?'Keine Treffer.':'Noch keine Ereignisse – die erste Prüfung merkt sich nur den aktuellen Stand, ab dann wird Neues hier gelistet.'}</div></td></tr>`}</tbody>
   </table></div>
-  <p class="chart-hint">Der Worker prüft alle 5 Minuten reihum die Quellen (bei vielen Quellen dauert ein voller Durchgang entsprechend länger). Bei Ereignissen geht eine Mail raus.</p>`
+  <p class="chart-hint">Der Worker prüft alle 5 Minuten reihum die Quellen (bei vielen Quellen dauert ein voller Durchgang entsprechend länger). Bei Ereignissen kommt eine Push-Nachricht – je Meldung eine.</p>`
   :(news.err?'':`<div class="empty">Lade News…</div>`)}`;
 }
 function wireNews(){
   const c=$('#nCheck'); if(c)c.onclick=()=>loadNews('/check','POST');
-  const t=$('#nTest'); if(t)t.onclick=async()=>{ try{ await newsCall('/test','POST'); toast('Testmail gesendet'); }catch(e){ toast(e.message); } };
   const po=$('#nPushOn'); if(po)po.onclick=pushEnable;
   const pt=$('#nPushTest'); if(pt)pt.onclick=pushTest;
   const pf=$('#nPushOff'); if(pf)pf.onclick=pushDisable;

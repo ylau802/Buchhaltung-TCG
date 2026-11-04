@@ -98,15 +98,15 @@ gesammelten ZIP-Export nach Journal + Zeitraum.
 
 ---
 
-## News & Mail (Shop-Monitor, optional)
+## News (Shop-Monitor, optional)
 
 Der Worker prüft reihum die Shops, die du in der App unter **News → Quellen**
 einträgst (URL pro Zeile einfügen, auch viele auf einmal). Pro Shop wird auf
 **Pokémon / One Piece / Dragon Ball** gefiltert und bei jeder Änderung gemeldet:
 **neue Produkte**, **Preisänderungen** und **ausverkauft → wieder verfügbar**
-(Dashboard unter *News*, auch via `…/yingway/#news`, plus eine gebündelte Mail
-pro Prüfrunde). Neue Quellen merken sich beim ersten Lauf nur den aktuellen
-Stand – keine Mail-Flut.
+(Dashboard unter *News*, auch via `…/yingway/#news`, plus je Meldung eine
+Push-Nachricht). Neue Quellen merken sich beim ersten Lauf nur den aktuellen
+Stand – keine Flut.
 
 - **Unterstützt:** Shopify-Shops und WooCommerce-Shops (am besten die
   Kategorie-/Kollektions-URL, z. B. `https://cardtreasure.ch/collections/…`
@@ -187,8 +187,8 @@ Nach `wrangler deploy` (neuer Worker) und dem Seiten-Deploy, pro Gerät einmalig
 Mit **Test-Push** prüfst du, ob es ankommt. Jedes Gerät meldet sich einzeln an
 (bis 8 Geräte); „Push aus“ meldet das aktuelle Gerät wieder ab. Die Schlüssel
 (VAPID) erzeugt der Worker selbst beim ersten Mal, es ist kein Secret nötig.
-Die Mail läuft parallel weiter – wer nur Push möchte, kann das Secret
-`NEWS_TO` mit `wrangler secret delete NEWS_TO` entfernen.
+Push ist der einzige Meldeweg; den früheren Mailversand über Resend gibt es
+nicht mehr.
 
 ---
 

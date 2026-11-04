@@ -27,18 +27,17 @@
  *
  * News-Monitor: ein Cron-Trigger (alle 5 Min.) prüft reihum die in der App eingetragenen
  * Shops (Shopify, WooCommerce, Shopware, ePages, CS-Cart, SumUp und wog.ch), filtert auf Pokémon / One Piece / Dragon Ball,
- * vergleicht mit dem letzten Stand und meldet per Mail (Resend-API): neue Produkte,
+ * vergleicht mit dem letzten Stand und meldet per Web-Push: neue Produkte,
  * Preisänderungen, ausverkauft -> wieder verfügbar.
- *   GET    /news                -> { sources, events, lastRun, lastError, mail }
+ *   GET    /news                -> { sources, events, lastRun, lastError, push }
  *   POST   /news/check          -> nächste Prüfrunde sofort ausführen (wie der Cron)
- *   POST   /news/test           -> Testmail
  *   POST   /news/sources        Body { urls:[…≤8], filter }  -> Quellen hinzufügen (Typ wird erkannt)
  *   PUT    /news/sources/<id>   Body { name?, off?, filter? }
  *   DELETE /news/sources/<id>
  *   GET /news/push/key · POST /news/push {sub} · POST /news/push/remove {endpoint} · POST /news/push/test
  *             -> Web-Push (PWA): Geräte anmelden, Test senden
- *   Gleiche Passphrase-Auth wie /files. Mail nur, wenn die Secrets RESEND_API_KEY und NEWS_TO
- *   gesetzt sind (siehe SETUP-SYNC.md); sonst läuft nur das Dashboard.
+ *   Gleiche Passphrase-Auth wie /files. Gemeldet wird per Push; ohne angemeldetes
+ *   Gerät läuft nur das Dashboard. (Der frühere Mailversand über Resend ist raus.)
  */
 
 const KV_KEY = 'vault';
@@ -162,7 +161,6 @@ async function handleFiles(request, env, url, tokenHash) {
 // Konfiguration (Liste der Quellen) und Zustand (Schnappschüsse, Ereignisse, Status) liegen in
 // getrennten KV-Einträgen: der Cron schreibt nur den Zustand, die App nur die Konfiguration.
 
-const esc = (v) => String(v == null ? '' : v).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const chf = (v) => (v == null ? 'Preis folgt' : 'CHF ' + Number(v).toFixed(2));
 // Franchise-Katalog: eingebaute + eigene (cfg.customFr = [{ name, kw: [Stichwörter] }]).
 // Pro Quelle wählt man, welche gemeldet werden (src.fr); leer = alle Produkte.
@@ -1110,42 +1108,12 @@ function describe(ev) {
   return chf(ev.p) + (ev.k === 'new' ? (ev.a ? ' · verfügbar' : ' · ausverkauft') : ' · wieder verfügbar');
 }
 
-async function sendMail(env, events, test) {
-  const to = (env.NEWS_TO || '').split(',').map((x) => x.trim()).filter(Boolean);
-  if (!env.RESEND_API_KEY || !to.length) return { skipped: true };
-  const shown = events.slice(0, 80), more = events.length - shown.length;
-  const row = (ev) =>
-    '<tr><td style="padding:9px 0;border-bottom:1px solid #eee">' +
-    '<span style="font-size:11px;color:#777;text-transform:uppercase">' + esc(KIND_LABEL[ev.k]) + ' · ' + esc(ev.s) + (ev.l ? ' · ' + esc(ev.l) : '') + '</span><br>' +
-    '<a href="' + esc(ev.u) + '" style="font-size:15px;font-weight:600;color:#1a1a1a;text-decoration:none">' + esc(ev.t) + '</a><br>' +
-    '<span style="color:#555;font-size:14px">' + esc(describe(ev)) + '</span><br>' +
-    '<a href="' + esc(ev.u) + '" style="font-size:13px;color:#0b6bcb">' + esc(ev.u) + '</a></td></tr>';
-  const count = (k) => events.filter((e) => e.k === k).length;
-  const parts = [['new', 'neu'], ['price', 'Preis'], ['stock', 'wieder verfügbar']].filter(([k]) => count(k)).map(([k, l]) => count(k) + ' ' + l);
-  const html = '<div style="font-family:-apple-system,Segoe UI,sans-serif;max-width:580px">' +
-    '<h2 style="margin:0 0 4px">' + (test ? 'Testmail – ' : '') + esc(parts.join(' · ')) + '</h2>' +
-    '<p style="color:#777;margin:0 0 12px;font-size:13px">YL News</p>' +
-    '<table style="border-collapse:collapse;width:100%">' + shown.map(row).join('') + '</table>' +
-    (more > 0 ? '<p style="color:#777">… und ' + more + ' weitere in der App unter News.</p>' : '') + '</div>';
-  const textBody = shown.map((ev) => '[' + KIND_LABEL[ev.k] + ' · ' + ev.s + '] ' + ev.t + '\n' + describe(ev) + '\n' + ev.u).join('\n\n');
-  const subject = (test ? 'Test: ' : '') +
-    (events.length === 1 ? KIND_LABEL[events[0].k] + ': ' + events[0].t + ' (' + events[0].s + ')' : events.length + ' News: ' + parts.join(', '));
-  const res = await fetch('https://api.resend.com/emails', {
-    method: 'POST',
-    headers: { Authorization: 'Bearer ' + env.RESEND_API_KEY, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ from: env.NEWS_FROM || 'YL News <onboarding@resend.dev>', to, subject, html, text: textBody }),
-  });
-  if (!res.ok) throw new Error('Resend: HTTP ' + res.status + ' ' + (await res.text()).slice(0, 200));
-  return { sent: to.length };
-}
-
 // Eine Prüfrunde: die am längsten ungeprüften Quellen, solange das Budget (Anfragen/Datenmenge)
 // reicht. Neue Quellen: erster Lauf nur Schnappschuss, keine Ereignisse.
 async function runWatch(env) {
   const now = new Date().toISOString();
   const cfg = await readCfg(env);
   const state = await readState(env);
-  const mailOn = !!env.RESEND_API_KEY && !!env.NEWS_TO;
 
   const todo = cfg.sources.filter((s) => !s.off)
     .sort((a, b) => ((state.src[a.id] || {}).lastCheck || '').localeCompare((state.src[b.id] || {}).lastCheck || ''));
@@ -1260,20 +1228,21 @@ async function runWatch(env) {
     events.push(...d.events);
   }
 
-  let mailErr = null;
-  if (events.length && mailOn) {
-    try { await sendMail(env, events, false); state.lastMail = now; } catch (e) { mailErr = e.message; }
+  // Push ist der einzige Weg, auf dem eine Meldung aufs Handy kommt. Kommt der
+  // Versand gar nicht zustande, bleibt der alte Schnappschuss der betroffenen
+  // Quellen stehen, damit der nächste Lauf dieselben Ereignisse erneut meldet.
+  // Ohne angemeldetes Gerät ist das kein Fehler: sendPush meldet dann schlicht null.
+  let pushErr = null;
+  if (events.length) {
+    try { await sendPush(env, events, false); } catch (e) { pushErr = e.message; }
   }
-  // Push nur, wenn die Mail nicht neu versucht werden muss (sonst käme er im nächsten Lauf doppelt).
-  if (events.length && !mailErr) { try { await sendPush(env, events, false); } catch (e) { /* Push ist Zusatz */ } }
-  // Schlug die Mail fehl, bleibt der alte Schnappschuss der betroffenen Quellen -> nächster Lauf versucht es erneut.
   for (const [id, next, st, n] of commits) {
-    if (mailErr && n) { st.lastError = 'Mail fehlgeschlagen, neuer Versuch folgt'; state.src[id] = st; continue; }
+    if (pushErr && n) { st.lastError = 'Push fehlgeschlagen, neuer Versuch folgt'; state.src[id] = st; continue; }
     state.snap[id] = next; state.src[id] = st;
   }
-  if (!mailErr && events.length) state.events = events.concat(state.events).slice(0, EVENTS_KEEP);
+  if (!pushErr && events.length) state.events = events.concat(state.events).slice(0, EVENTS_KEEP);
   state.lastRun = now;
-  state.lastError = mailErr;
+  state.lastError = pushErr;
   // Gelöschte Quellen aufräumen
   const ids = new Set(cfg.sources.map((s) => s.id));
   for (const k of Object.keys(state.snap)) if (!ids.has(k)) { delete state.snap[k]; delete state.src[k]; }
@@ -1291,24 +1260,12 @@ async function handleNews(request, env, url, tokenHash) {
     sources: cfg.sources.map((s) => Object.assign({}, s, { fr: srcFr(s), st: st.src[s.id] || null })),
     catalog: CATALOG.map((c) => c[0]), custom: cfg.customFr || [],
     events: (st.events || []).slice(0, 300),
-    lastRun: st.lastRun || null, lastError: st.lastError || null, lastMail: st.lastMail || null,
-    mail: !!env.RESEND_API_KEY && !!env.NEWS_TO, push: pushN,
+    lastRun: st.lastRun || null, lastError: st.lastError || null, push: pushN,
   });
   const path = url.pathname, m = request.method;
 
   if (path === '/news' && m === 'GET') return view(await readCfg(env), await readState(env));
   if (path === '/news/check' && m === 'POST') { const r = await runWatch(env); return view(r.cfg, r.state); }
-
-  if (path === '/news/test' && m === 'POST') {
-    const st = await readState(env);
-    const evs = st.events.length ? st.events.slice(0, 3)
-      : [{ k: 'new', s: 'Testshop', t: 'Beispiel-Produkt (Testmail)', p: 19.9, a: 1, u: 'https://example.com/' }];
-    try {
-      const r = await sendMail(env, evs, true);
-      if (r.skipped) return json({ error: 'Mail nicht eingerichtet (RESEND_API_KEY / NEWS_TO fehlt)' }, 400);
-      return json({ ok: true, sent: r.sent });
-    } catch (e) { return json({ error: e.message }, 502); }
-  }
 
   if (path === '/news/push/key' && m === 'GET') return json({ key: (await getVapid(env)).pub });
   if (path === '/news/push' && m === 'POST') {
