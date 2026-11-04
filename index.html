@@ -1261,7 +1261,7 @@ function viewLager(){
 }
 
 /* ---------- News (Shop-Monitor, läuft im Worker) ---------- */
-const news={data:null,loading:false,err:'',fr:'',kind:'',src:'',q:'',showSrc:false,showWatch:false,urls:'',addName:'',addNameTouched:false,addFr:[],fedit:null,ren:null,cfName:'',cfKw:'',msgs:[],auto:false,chat:[],wurls:'',wbusy:false};
+const news={data:null,loading:false,err:'',fr:'',lang:'',kind:'',src:'',q:'',showSrc:false,showWatch:false,urls:'',addName:'',addNameTouched:false,addFr:[],fedit:null,ren:null,cfName:'',cfKw:'',msgs:[],auto:false,chat:[],wurls:'',wbusy:false};
 const newsCatalog=()=>(news.data&&news.data.catalog)||['Pokémon','One Piece','Dragon Ball'];
 const NEWS_KIND={new:'Neu',price:'Preis',stock:'Wieder verfügbar'};
 // Sprache, wie der Worker sie am Artikel erkannt hat (leer = steht nirgends).
@@ -1474,7 +1474,11 @@ function viewNews(){
   const byName=(a,b)=>String(a.name||'').localeCompare(String(b.name||''),'de',{sensitivity:'base',numeric:true});
   const S=ALL.filter(s=>!s.item).sort(byName), W=ALL.filter(s=>s.item).sort(byName);
   const q=news.q.toLowerCase();
-  const f=((d&&d.events)||[]).filter(e=>(!news.kind||e.k===news.kind)&&(!news.src||e.s===news.src)&&(!news.fr||e.g===news.fr)&&(!q||e.t.toLowerCase().includes(q)));
+  const EV=(d&&d.events)||[];
+  // Sprachen nur anbieten, soweit sie in den Meldungen wirklich vorkommen.
+  const langs=[...new Set(EV.map(e=>e.l).filter(Boolean))]
+    .sort((a,b)=>String(NEWS_LANG[a]||a).localeCompare(String(NEWS_LANG[b]||b),'de'));
+  const f=EV.filter(e=>(!news.kind||e.k===news.kind)&&(!news.src||e.s===news.src)&&(!news.fr||e.g===news.fr)&&(!news.lang||e.l===news.lang)&&(!q||e.t.toLowerCase().includes(q)));
   const status=d?`Letzter Lauf ${d.lastRun?ago(d.lastRun):'noch nie'} · ${S.filter(s=>!s.off).length} Quellen · ${W.length} beobachtet · Mail ${d.mail?'<b class="pos">aktiv</b>':'<b class="neg">nicht eingerichtet</b>'} · Push ${d.push?`<b class="pos">${d.push} Gerät${d.push>1?'e':''}</b>`:'<b class="neg">aus</b>'}`:'';
   const srcStatus=s=>{ const st=s.st;
     if(s.off) return '<span class="count">pausiert</span>';
@@ -1569,6 +1573,7 @@ function viewNews(){
     <select id="nKind"><option value="">Alle Ereignisse</option>${Object.entries(NEWS_KIND).map(([k,l])=>`<option value="${k}" ${news.kind===k?'selected':''}>${l}</option>`).join('')}</select>
     <select id="nSrc"><option value="">Alle Quellen</option>${[...new Set(ALL.map(s=>s.shop||s.name))].sort((a,b)=>String(a).localeCompare(String(b),'de',{sensitivity:'base',numeric:true})).map(n=>`<option ${news.src===n?'selected':''}>${esc(n)}</option>`).join('')}</select>
     <select id="nFr"><option value="">Alle Franchises</option>${newsCatalog().map(k=>`<option ${news.fr===k?'selected':''}>${esc(k)}</option>`).join('')}</select>
+    ${langs.length?`<select id="nLang"><option value="">Alle Sprachen</option>${langs.map(k=>`<option value="${esc(k)}" ${news.lang===k?'selected':''}>${esc(NEWS_LANG[k]||k)}</option>`).join('')}</select>`:''}
     <span class="count" style="margin-left:auto">${status}</span>
   </div>
   ${d?`<div class="tbl-wrap"><table>
@@ -1635,7 +1640,7 @@ function wireNews(){
   $$('[data-sdel]').forEach(b=>b.onclick=()=>{ const s=news.data.sources.find(x=>x.id===b.dataset.sdel); if(confirm(`„${s.name}“ nicht mehr prüfen?`)) loadNews('/sources/'+s.id,'DELETE'); });
   const q=$('#nQ'); if(q)q.oninput=debounce(()=>{news.q=q.value;draw();
     const el=$('#nQ'); if(el){el.focus();el.setSelectionRange(el.value.length,el.value.length);}},200);
-  [['nKind','kind'],['nSrc','src'],['nFr','fr']].forEach(([id,k])=>{ const el=$('#'+id); if(el)el.onchange=()=>{news[k]=el.value;draw();}; });
+  [['nKind','kind'],['nSrc','src'],['nFr','fr'],['nLang','lang']].forEach(([id,k])=>{ const el=$('#'+id); if(el)el.onchange=()=>{news[k]=el.value;draw();}; });
 }
 setInterval(()=>{ if(route==='news'&&document.visibilityState==='visible'&&!news.loading) loadNews(); },60000);
 
