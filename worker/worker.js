@@ -47,7 +47,7 @@ const MAX_FILE_BYTES = 20 * 1024 * 1024;
 
 const WOG_LIST = 'https://www.wog.ch/de/index.cfm/ajax.productList';
 const WATCH_UA = 'Mozilla/5.0 (compatible; YLMonitor/1.0; +https://ylau802.github.io/Buchhaltung-TCG/)';
-const MAX_SOURCES = 100;
+const MAX_SOURCES = 400;
 const MAX_PAGES = 4;          // Shopify: bis 4 x 250 Produkte pro Kollektion
 // Seiten je Durchlauf: [schnell, vollstaendig]. Schnell laeuft jede Runde und deckt
 // die neuesten Artikel ab (die Listen sind nach "Neuste zuerst" sortiert), der volle
@@ -629,6 +629,53 @@ function suProduct(html, url) {
   };
 }
 
+// ---- robots.txt beachten ----------------------------------------------------
+// Welche Adressen ein Shop fuer automatische Abrufe freigibt, steht in seiner
+// robots.txt. Bei Shopware entscheidet das, wie geblaettert werden darf:
+// twomoons.ch erlaubt ausdruecklich "?p=", amazingtoys.ch verbietet jede Adresse
+// mit Fragezeichen, gibt dafuer aber /widgets/cms/ frei - die Schnittstelle, die
+// die Seite beim Blaettern selbst benutzt.
+const robotsCache = new Map();
+async function robotsRules(origin) {
+  if (robotsCache.has(origin)) return robotsCache.get(origin);
+  let rules = null;
+  try {
+    const res = await fetch(origin + '/robots.txt', { headers: { 'User-Agent': WATCH_UA } });
+    if (res.ok) {
+      rules = [];
+      let forUs = false;
+      for (const raw of (await res.text()).slice(0, 100000).split(/\r?\n/)) {
+        const m = raw.replace(/#.*$/, '').trim().match(/^(user-agent|allow|disallow)\s*:\s*(.*)$/i);
+        if (!m) continue;
+        const k = m[1].toLowerCase(), v = m[2].trim();
+        if (k === 'user-agent') forUs = v === '*';
+        else if (forUs && v) rules.push([k === 'allow', v]);
+      }
+    }
+  } catch (e) { /* keine robots.txt erreichbar -> keine Einschraenkung */ }
+  robotsCache.set(origin, rules);
+  return rules;
+}
+const robotsHit = (pat, path) => {
+  const end = pat.endsWith('$');
+  const body = (end ? pat.slice(0, -1) : pat).replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+  try { return new RegExp('^' + body + (end ? '$' : '')).test(path); } catch (e) { return false; }
+};
+// Es gilt die laengste zutreffende Regel; bei gleicher Laenge gewinnt Allow.
+async function robotsAllows(url) {
+  let u;
+  try { u = new URL(url); } catch (e) { return true; }
+  const rules = await robotsRules(u.origin);
+  if (!rules || !rules.length) return true;
+  const path = u.pathname + u.search;
+  let best = null;
+  for (const [allow, pat] of rules) {
+    if (!robotsHit(pat, path)) continue;
+    if (!best || pat.length > best[1] || (pat.length === best[1] && allow)) best = [allow, pat.length];
+  }
+  return best ? best[0] : true;
+}
+
 // Shopware 6 (z. B. twomoons.ch): jede Kachel traegt ihre Daten als JSON im
 // Attribut data-product-information (id, Name, Marke, Preis); Link, Bild und der
 // Kaufen-Knopf stehen daneben. 96 Artikel je Seite, dafuer sehr viel Markup.
@@ -665,6 +712,26 @@ function swItems(html) {
   return out;
 }
 
+// Shopware liefert dieselbe Liste auch ueber /widgets/cms/... - dort passen bis zu
+// 96 Artikel in einen Abruf, und es kommt nur das Raster statt der ganzen Seite.
+// Die Adresse steht in der Seite, im Attribut data-listing-options.
+const SW_LIMIT = 96;
+function swDataUrl(html) {
+  const m = html.match(/data-listing-options="([^"]*)"/);
+  if (!m) return '';
+  let o;
+  try { o = JSON.parse(decodeEntities(m[1])); } catch (e) { return ''; }
+  if (!o || !o.dataUrl) return '';
+  const q = new URLSearchParams(o.params || {}).toString();
+  return o.dataUrl + (q ? '?' + q : '');
+}
+function swWidgetUrl(base, data, n) {
+  const u = new URL(data, base);
+  u.searchParams.set('limit', String(SW_LIMIT));
+  if (n > 1) u.searchParams.set('p', String(n));
+  return u.toString();
+}
+
 function swPageUrl(base, n) {
   const u = new URL(base);
   if (n > 1) u.searchParams.set('p', String(n)); else u.searchParams.delete('p');
@@ -672,27 +739,38 @@ function swPageUrl(base, n) {
 }
 
 async function fetchShopware(src, plan) {
-  const want = Array.isArray(plan) && plan.length ? plan : [1];
+  let want = Array.isArray(plan) && plan.length ? plan : [1];
+  // Beim ersten Lauf ist die Schnittstelle noch nicht bekannt; sie wird aus Seite 1
+  // gelesen und ab dem naechsten Lauf verwendet. Innerhalb eines Laufs nicht wechseln,
+  // sonst passten die Seitengrenzen nicht mehr zusammen.
+  const data = (src.cat && (await robotsAllows(new URL(src.cat, src.url).toString()))) ? src.cat : '';
+  if (!data && !(await robotsAllows(swPageUrl(src.url, 2)))) want = [1];   // Blaettern nicht erlaubt
   const out = [], seen = new Set();
-  let pages = 0, bytes = 0, firstCount = 0, perPage = 0, end = false;
+  let pages = 0, bytes = 0, firstCount = 0, perPage = 0, end = false, learned = src.cat || '';
   for (const p of want) {
     if (pages) await sleep(HOST_PAUSE);
-    const { html, bytes: b } = await getHtml(swPageUrl(src.url, p));
+    const { html, bytes: b } = await getHtml(data ? swWidgetUrl(src.url, data, p) : swPageUrl(src.url, p));
     pages++; bytes += b;
+    if (!learned) learned = swDataUrl(html);
     const list = swItems(html);
     if (!list.length) {
       if (p === 1) throw new Error(new URL(src.url).host + ': keine Produktliste gefunden');
       end = true; break;
     }
+    let added = 0;
     for (const it of list) {
       if (seen.has(it.id)) continue;
-      seen.add(it.id);
+      seen.add(it.id); added++;
       if (passes(src, it.hay)) { delete it.hay; out.push(it); }
     }
     if (p === 1) { firstCount = out.length; perPage = list.length; }
+    // Hinter der letzten Seite gibt Shopware nicht etwa nichts zurueck, sondern
+    // noch einmal dieselbe Liste. Kommt nichts Neues, ist Schluss.
+    else if (!added) { end = true; break; }
     if (perPage && list.length < perPage) { end = true; break; }   // letzte Seite war nicht voll
   }
-  return { list: out, pages, bytes, firstCount, end };
+  if (want.length === 1 && !end) end = true;   // nur Seite 1 erlaubt: nicht weiterwandern
+  return { list: out, pages, bytes, firstCount, end, cat: learned };
 }
 
 // Produktseite: Name in der H1 (ohne die Marken-Zeile darueber), Preis als
@@ -1234,7 +1312,9 @@ async function detectSource(url) {
     if (isShopware(html)) {
       const site = decodeEntities((html.match(/property="og:site_name" content="([^"]*)"/) || [])[1] || '')
         || stripTags((html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/) || [])[1]) || shop;
-      return { type: 'shopware', url: withQuery, name: site, shopName: site, html };
+      // Die Listen-Schnittstelle gleich mitnehmen, dann muss sie nicht erst
+      // im ersten Lauf gelernt werden.
+      return { type: 'shopware', url: withQuery, cat: swDataUrl(html) || undefined, name: site, shopName: site, html };
     }
     if (isPresta(html)) {
       // Den Zaehler aus der Ueberschrift werfen ("Es gibt 187 Artikel."),
@@ -1761,7 +1841,10 @@ async function runWatch(env, only) {
           plan = (PAGE_BUDGET[s.type] || PAGE_BUDGET.shopify)[full ? 1 : 0];
           isFull = full;
         }
-        try { results.push({ s, full: win ? true : isFull, win, r: await fetchSource(s, plan) }); }
+        // Shopware lernt beim ersten Lauf die Listen-Schnittstelle des Shops; sie
+        // liegt danach im Zustand der Quelle und wird hier wieder mitgegeben.
+        const sx = s.type === 'shopware' && !s.cat && h0.sw ? Object.assign({}, s, { cat: h0.sw }) : s;
+        try { results.push({ s, full: win ? true : isFull, win, r: await fetchSource(sx, plan) }); }
         catch (e) { results.push({ s, err: e.message }); }
       }
     }
@@ -1814,6 +1897,7 @@ async function runWatch(env, only) {
     if (st.cool) delete st.cool;
     if (st.coolN) delete st.coolN;
     if (s.item && r.list[0]) st.cur = { p: r.list[0].p, a: r.list[0].a };
+    if (r.cat && r.cat !== st.sw) st.sw = r.cat;
     commits.push([s.id, d.next, st, d.events.length]);
     events.push(...d.events);
   }
