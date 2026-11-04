@@ -806,9 +806,10 @@ function swProduct(html, url) {
 // Lagerstand und das Blaettern macht jedes Theme anders, darum wird beides versucht.
 // Nach Datum sortieren verbietet die robots.txt beider Shops (orderby, orderway, n),
 // darum liest der Monitor hier mit dem wandernden Fenster.
-const isPresta = (html) => html.includes('ajax_block_product') && html.includes('data-id-product=');
-const isPsListing = (html) => html.includes('class="product_list');
-const isPsDetail = (html) => html.includes('itemprop="availability"') && !html.includes('class="product_list');
+// 1.6 und thirty bees nennen die Kachel "ajax_block_product", 1.7 "js-product-miniature".
+const isPresta = (html) => (html.includes('ajax_block_product') || html.includes('js-product-miniature')) && html.includes('data-id-product=');
+const isPsListing = (html) => html.includes('class="product_list') || html.includes('id="js-product-list"');
+const isPsDetail = (html) => html.includes('itemprop="availability"') && !isPsListing(html);
 // "49,90 CHF", "CHF 5.90", auch mit Tausender-Hochkomma.
 const psPrice = (s) => {
   const m = String(s == null ? '' : s).replace(/[\u2019'\s]/g, '').match(/(\d+(?:[.,]\d{1,2})?)/);
@@ -817,20 +818,28 @@ const psPrice = (s) => {
 const psStock = (s) => (/InStock|PreOrder|BackOrder|LimitedAvailability/i.test(s) ? 1 : 0);
 
 function psItems(html) {
-  const start = html.indexOf('class="product_list');
+  // 1.6 und thirty bees listen in <div class="product_list">, 1.7 in <div id="js-product-list">.
+  let start = html.indexOf('class="product_list');
+  if (start < 0) start = html.indexOf('id="js-product-list"');
   if (start < 0) return [];     // Startseite o. \u00c4.: lose Kacheln ohne Liste ignorieren
+  const body = html.slice(start);
+  const marker = body.includes('js-product-miniature') ? 'js-product-miniature' : 'ajax_block_product';
   const out = [];
-  for (const chunk of html.slice(start).split('ajax_block_product').slice(1)) {
+  for (const chunk of body.split(marker).slice(1)) {
     // Kachelgrenze. Ohne sie erbte die letzte Kachel den ganzen Rest der Seite \u2013
     // mitsamt den Preisen aus Karussells weiter unten.
     const cut = chunk.indexOf('</form>');
-    const c = chunk.slice(0, cut > 0 ? cut : 8000);
+    const c = chunk.slice(0, cut > 200 ? cut : 8000);
     const m = (re) => { const x = c.match(re); return x ? x[1] : ''; };
-    const link = (c.match(/<a[^>]*class="(?:product_img_link|product-name|no-underline)"[^>]*>/) || [''])[0];
+    // Erst die Themes mit eigener Link-Klasse, sonst der Titel-Link, sonst der erste echte Link.
+    const link = (c.match(/<a[^>]*class="(?:product_img_link|product-name|no-underline)"[^>]*>/)
+      || c.match(/product-title[^>]*>\s*<a[^>]*>/)
+      || c.match(/<a[^>]+href="https?:\/\/[^"]+"[^>]*>/) || [''])[0];
     const u = (link.match(/href="([^"]+)"/) || [])[1] || '';
     // Der sichtbare Linktext ist in manchen Themes abgeschnitten ("Sleeved..."),
     // das title-Attribut traegt den vollen Namen.
-    const t = decodeEntities((link.match(/title="([^"]*)"/) || [])[1] || stripTags(m(/<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/)));
+    const t = decodeEntities((link.match(/title="([^"]*)"/) || [])[1]
+      || stripTags(m(/<h[1-6][^>]*product-title[^>]*>([\s\S]*?)<\/h[1-6]>/) || m(/<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/)));
     if (!u || !t) continue;
     const av = m(/itemprop="availability"[^>]*(?:href|content)="([^"]*)"/);
     out.push({
@@ -838,11 +847,12 @@ function psItems(html) {
       t,
       p: psPrice(m(/itemprop="price"[^>]*content="([^"]+)"/)
         || m(/<span[^>]*itemprop="price"[^>]*>([^<]*)</)
-        || m(/class="price_default"[^>]*>([^<]*)</)),
-      // Mikrodaten, wo vorhanden; sonst der Knopftext. "Vorausbestellen" zaehlt
-      // als verfuegbar, denn kaufen laesst es sich.
-      a: av ? psStock(av) : (/Nicht auf Lager/.test(c) ? 0 : 1),
-      u, i: m(/<img[^>]*\ssrc="([^"]+)"/),
+        || m(/class="price_default"[^>]*>([^<]*)</)
+        || m(/<span[^>]*class="[^"]*\bprice\b[^"]*"[^>]*>([^<]*)</)),
+      // Mikrodaten, wo vorhanden; sonst der Knopf- oder Lagertext.
+      // "Vorausbestellen" zaehlt als verfuegbar, denn kaufen laesst es sich.
+      a: av ? psStock(av) : (/product-unavailable|Out-of-Stock|Nicht auf Lager/i.test(c) ? 0 : 1),
+      u, i: m(/<img[^>]*\ssrc\s*=\s*"([^"]+)"/),
       g: franchiseOf(t + ' ' + u),
       hay: t + ' ' + u,
     });
@@ -850,15 +860,16 @@ function psItems(html) {
   return out;
 }
 
-// Geblaettert wird je nach Theme mit ?p=2 oder mit ?offset=30. Welches, verraet
-// die erste Seite selbst mit ihren eigenen Blaetter-Links.
-const psMode = (html) => (/[?&]offset=\d/.test(html) ? 'offset' : 'p');
+// Geblaettert wird je nach Fassung mit ?p=2 (1.6), ?page=2 (1.7) oder ?offset=30
+// (thirty bees). Welches gilt, verraet die erste Seite mit ihren eigenen
+// Blaetter-Links.
+const psMode = (html) => (/[?&]offset=\d/.test(html) ? 'offset' : /[?&]page=\d/.test(html) ? 'page' : 'p');
 function psPageUrl(base, n, mode, per) {
   const u = new URL(base);
-  u.searchParams.delete('p'); u.searchParams.delete('offset');
+  u.searchParams.delete('p'); u.searchParams.delete('page'); u.searchParams.delete('offset');
   if (n > 1) {
     if (mode === 'offset') u.searchParams.set('offset', String((n - 1) * per));
-    else u.searchParams.set('p', String(n));
+    else u.searchParams.set(mode === 'page' ? 'page' : 'p', String(n));
   }
   return u.toString();
 }
@@ -891,8 +902,10 @@ async function fetchPresta(src, plan) {
 // Produktseite: die Mikrodaten sind dem sichtbaren Markup vorzuziehen \u2013 unter dem
 // Produkt haengt ein Zubehoer-Karussell mit eigenen Preisen und eigenem Lagerstand.
 function psProduct(html, url) {
-  const t = decodeEntities((html.match(/itemprop="name" content="([^"]*)"/) || [])[1]
-    || stripTags((html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/) || [])[1] || ''));
+  // Erst die Ueberschrift: das itemprop="name" ganz oben gehoert bei manchen
+  // Themes dem Laden, nicht dem Artikel (toytans nennt sich dort selbst).
+  const t = decodeEntities(stripTags((html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/) || [])[1] || '')
+    || (html.match(/itemprop="name" content="([^"]*)"/) || [])[1] || '');
   if (!t) throw new Error('Produktseite nicht lesbar');
   const price = psPrice((html.match(/<meta itemprop="price" content="([^"]+)"/) || [])[1]
     || (html.match(/<span[^>]*itemprop="price"[^>]*>([^<]*)</) || [])[1]);
