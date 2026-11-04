@@ -932,12 +932,101 @@ function ldProduct(html, url) {
   return Object.assign(x, { id: x.u, pid: x.u });
 }
 
+// ePages 6, die klassische Fassung (z. B. fabitasia-cards.ch). Nicht zu verwechseln
+// mit ePages Now (calandamagic.ch), das eine JSON-Schnittstelle hat - hier gibt es
+// nur HTML: Kacheln mit data-productGUID, Preis und Lagerstand als Mikrodaten.
+// Wichtig ist die Adresse: an der blanken Domain laesst der Shop jeden Parameter
+// fallen, gearbeitet wird mit dem Einstieg /epages/<nummer>.sf/<sprache>/.
+const E6_PER_PAGE = 36;
+const isEpages6 = (html) => html.includes('data-productGUID') && /\/epages\/\d+\.sf\//.test(html);
+const isE6Detail = (html) => html.includes('itemprop="availability"') && !html.includes('class="CategoryProducts"');
+const e6Base = (html, url) => (html.match(/https?:\/\/[^"'\s]+\/epages\/\d+\.sf\/[A-Za-z_]+\//) || [url])[0];
+
+function e6Items(html, base) {
+  const out = [];
+  // Die Kacheln liegen zwischen 1400 und 2900 Zeichen auseinander; die letzte wuerde
+  // ohne Grenze den ganzen Seitenfuss erben.
+  for (const chunk of html.split('data-productGUID=').slice(1)) {
+    const c = chunk.slice(0, 3000);
+    const id = (c.match(/"id":\s*"([^"]+)"/) || [])[1];
+    const a = c.match(/<h3[^>]*>\s*<a\s+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/);
+    if (!id || !a) continue;
+    const t = decodeEntities(stripTags(a[2]));
+    if (!t) continue;
+    const u = new URL(decodeEntities(a[1]), base).toString();
+    const img = (c.match(/<img[^>]*class="[^"]*ProductSmallImage[^"]*"[^>]*\ssrc="([^"]+)"/) || [])[1] || '';
+    out.push({
+      id, t,
+      p: Number((c.match(/itemprop=['"]price['"][^>]*content=['"]([^'"]+)/) || [])[1]) || null,
+      // Das Lager-Symbol steht nur bei kaufbarer Ware ("Auf Lager" oder "Begrenzter
+      // Lagerbestand"). Fehlt es, ist der Artikel aus - an den Kacheln selbst steht
+      // das nirgends, nachgeprueft an den Produktseiten.
+      a: /Product(On|Warn)StockIcon/.test(c) ? 1 : 0,
+      u, i: img ? new URL(img, base).toString() : '',
+      g: franchiseOf(t + ' ' + u),
+      hay: t + ' ' + u,
+    });
+  }
+  return out;
+}
+
+const e6PageUrl = (base, n) => {
+  const u = new URL(base);
+  u.searchParams.set('PageSize', String(E6_PER_PAGE));
+  if (n > 1) u.searchParams.set('Page', String(n)); else u.searchParams.delete('Page');
+  return u.toString();
+};
+
+async function fetchEpages6(src, max) {
+  const out = [], seen = new Set();
+  let pages = 0, bytes = 0, truncated = false;
+  for (let page = 1; page <= (max || MAX_PAGES); page++) {
+    if (pages) await sleep(HOST_PAUSE);
+    const { html, bytes: b } = await getHtml(e6PageUrl(src.url, page));
+    pages++; bytes += b;
+    const list = e6Items(html, src.url);
+    if (!list.length) {
+      if (page === 1) throw new Error(new URL(src.url).host + ': keine Produktliste gefunden');
+      break;
+    }
+    let added = 0;
+    for (const it of list) {
+      if (seen.has(it.id)) continue;
+      seen.add(it.id); added++;
+      if (passes(src, it.hay)) { delete it.hay; out.push(it); }
+    }
+    // Die Startseite des Shops blaettert gar nicht und liefert immer dieselbe Liste.
+    // Kommt nichts Neues mehr, ist Schluss - sonst holten wir jede Runde dasselbe.
+    if (!added) break;
+    if (page === (max || MAX_PAGES)) truncated = true;
+  }
+  return { list: out, pages, bytes, truncated };
+}
+
+function e6Product(html, url) {
+  const t = decodeEntities(stripTags((html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/) || [])[1] || ''));
+  if (!t) throw new Error('Produktseite nicht lesbar');
+  const u = (html.match(/rel="canonical" href="([^"]+)"/) || [])[1] || url;
+  const avail = (html.match(/itemprop=['"]availability['"][^>]*content=['"]([^'"]+)/) || [])[1] || '';
+  const img = (html.match(/property="og:image" content="([^"]+)"/) || [])[1]
+    || (html.match(/<img[^>]*itemprop="image"[^>]*\ssrc="([^"]+)"/) || [])[1] || '';
+  return {
+    id: u, pid: u, t,
+    p: Number((html.match(/itemprop=['"]price['"][^>]*content=['"]([^'"]+)/) || [])[1]) || null,
+    a: /InStock|PreOrder|BackOrder|LimitedAvailability/i.test(avail) ? 1 : 0,
+    u, i: img ? new URL(img, url).toString() : '',
+    g: franchiseOf(t + ' ' + u),
+  };
+}
+
 const fetchSource = (src, max) => (src.item ? fetchItem(src).then((r) => { r.list.forEach((x) => { x.id = 'x'; }); return r; }) : src.type === 'wog' ? fetchWog(src) : src.type === 'woocommerce' ? fetchWoo(src, max) : src.type === 'epages' ? fetchEpages(src, max) : src.type === 'cscart' ? fetchCs(src, max) : src.type === 'sumup' ? fetchSumup(src, max) : src.type === 'shopware' ? fetchShopware(src, max)
   : src.type === 'prestashop' ? fetchPresta(src, max)
-  : src.type === 'jsonld' ? fetchJsonLd(src, max) : fetchShopify(src, max));
+  : src.type === 'jsonld' ? fetchJsonLd(src, max)
+  : src.type === 'epages6' ? fetchEpages6(src, max) : fetchShopify(src, max));
 const srcKey = (s) => (s.item ? 'item:' + new URL(s.url).origin + '|' + (s.item.handle || s.item.slug || s.item.pid) + '|' + (s.item.vid || '') : s.type === 'wog' ? 'wog' : s.type === 'woocommerce' ? wooApi(s) + '#' + (s.cat || '') : s.type === 'epages' ? epagesApi(s) + '#' + (s.cat || '') : s.type === 'cscart' ? csClean(s.url) : s.type === 'sumup' ? suPageUrl(s.url, 1) : s.type === 'shopware' ? swPageUrl(s.url, 1)
   : s.type === 'prestashop' ? psPageUrl(s.url, 1, 'p', 0)
-  : s.type === 'jsonld' ? ldPageUrl(s.url, 1) : shopifyApi(s));
+  : s.type === 'jsonld' ? ldPageUrl(s.url, 1)
+  : s.type === 'epages6' ? e6PageUrl(s.url, 1) : shopifyApi(s));
 
 
 // Shop-Typ erkennen (wog.ch, Shopify, WooCommerce) und einen lesbaren Namen bilden.
@@ -978,6 +1067,16 @@ async function detectSource(url) {
   try { ({ html } = await getHtml(withQuery)); }
   catch (e) { if (/HTTP (40[13]|429)/.test(e.message)) blocked = e.message; }
   if (html) {
+    if (isEpages6(html)) {
+      // Die Adresse auf den Shop-Einstieg bringen; sonst wird jeder Parameter ignoriert.
+      const b = e6Base(html, clean);
+      const keep = /[?&]ObjectPath=/.test(withQuery) ? new URL(withQuery).search : '';
+      // Auf einer Kategorieseite steht im Titel die Kategorie, nicht der Laden -
+      // der Shopname taugt von dort nur, wenn es keine Ueberschrift gibt.
+      const site = decodeEntities(((html.match(/<title>([\s\S]*?)<\/title>/) || [])[1] || '').split(/[-|\u2013]/)[0].trim()) || shop;
+      const h1 = decodeEntities(stripTags((html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/) || [])[1] || ''));
+      return { type: 'epages6', url: b + keep, name: h1 ? shop + ' \u00b7 ' + h1 : site, shopName: shop, html };
+    }
     const cat = epagesFromHtml(u.pathname, html);   // wirft bei unbekannter Kategorie
     if (cat) {
       const name = cat.shop || shop;
@@ -1105,6 +1204,10 @@ async function fetchItem(src) {
     const { html, bytes } = await getHtml(src.url);
     return { list: [ldProduct(html, src.url)], pages: 1, bytes };
   }
+  if (src.type === 'epages6') {
+    const { html, bytes } = await getHtml(src.url);
+    return { list: [e6Product(html, src.url)], pages: 1, bytes };
+  }
   const { html, bytes } = await getHtml(src.url);
   return { list: [wogItemFromHtml(html, src.url)], pages: 1, bytes };
 }
@@ -1175,6 +1278,18 @@ async function probeLink(raw) {
     const list = csItems(csHtml, u.origin).slice(0, 12);
     return { kind: 'collection', shop: det.name, source: { url: det.url },
       items: list.map((x) => ({ type: 'cscart', shop: name, title: x.t, price: x.p, a: x.a, img: x.i, url: x.u, item: { pid: x.id } })) };
+  }
+
+  if (det && det.type === 'epages6') {
+    const e6Html = det.html || (await getHtml(det.url)).html;
+    const name = det.shopName || shop;
+    if (isE6Detail(e6Html)) {
+      const x = e6Product(e6Html, det.url);
+      return { kind: 'product', shop: name, items: tag([x], 'epages6', name, { pid: x.pid }) };
+    }
+    const list = e6Items(e6Html, det.url).slice(0, 12);
+    return { kind: 'collection', shop: name, source: { url: det.url },
+      items: list.map((x) => ({ type: 'epages6', shop: name, title: x.t, price: x.p, a: x.a, img: x.i, url: x.u, item: { pid: x.id, url: x.u } })) };
   }
 
   if (det && det.type === 'jsonld') {
