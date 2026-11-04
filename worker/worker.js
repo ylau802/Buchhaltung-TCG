@@ -189,8 +189,11 @@ async function getJson(url, init) {
 
 function shopifyApi(src) {
   const u = new URL(src.url);
-  const m = u.pathname.match(/^\/(?:[a-z]{2}(?:-[A-Z]{2})?\/)?collections\/([^/]+)/);
-  return u.origin + (m ? '/collections/' + m[1] : '') + '/products.json';
+  // Sprachpraefix wie /de-ch/ oder /en/ gehoert zum Pfad und bleibt stehen. Shopify
+  // schreibt es mal klein (de-ch), mal gross (de-CH) – ohne das i blieb die Kollektion
+  // unerkannt und es wurde der ganze Shop geprueft statt nur dieser Kollektion.
+  const m = u.pathname.match(/^(\/[a-z]{2}(?:-[a-z]{2})?)?\/collections\/([^/]+)/i);
+  return u.origin + (m ? (m[1] || '') + '/collections/' + m[2] : '') + '/products.json';
 }
 const shopifyImg = (src) => (src ? src.replace(/(\.\w+)(\?.*)?$/, '_150x$1$2') : '');
 
