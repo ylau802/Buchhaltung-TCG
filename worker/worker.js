@@ -2008,6 +2008,19 @@ async function runWatch(env, only) {
     for (const s of cfg.sources) if (s.type === 'sumup' || s.type === 'prestashop') resetSource(state, s.id);
     state.fix = FIX;
   }
+  // Einmalig: die Flut falscher "Neu"-Meldungen aufraeumen, die entstand, als die
+  // Shopware-Quellen auf die Listen-Schnittstelle umstiegen und auf einen Schlag
+  // viel mehr Artikel sahen. Betroffen ist nur, was in den letzten drei Stunden
+  // als "neu" von einem Shopware-Shop gemeldet wurde.
+  const FIX2 = 'shopware-flut-1';
+  if (state.fix2 !== FIX2) {
+    const sw = new Set(cfg.sources.filter((s) => s.type === 'shopware').map((s) => s.shop || s.name));
+    const since = Date.parse(now) - 3 * 60 * 60 * 1000;
+    if (sw.size && Array.isArray(state.events)) {
+      state.events = state.events.filter((e) => !(e.k === 'new' && sw.has(e.s) && Date.parse(e.at) >= since));
+    }
+    state.fix2 = FIX2;
+  }
 
   const todo = cfg.sources.filter((s) => !s.off && (!pick || pick.has(s.id)))
     .sort((a, b) => ((state.src[a.id] || {}).lastCheck || '').localeCompare((state.src[b.id] || {}).lastCheck || ''));
@@ -2104,9 +2117,21 @@ async function runWatch(env, only) {
     // steht laengst im Laden und wird still uebernommen.
     // Bei den anderen gilt dasselbe, sobald ein Lauf tiefer liest als je zuvor.
     const deeper = r.pages > (st.seenPages || 0);
-    const silentFrom = win ? r.firstCount : (deeper ? Object.keys(snap).length : null);
+    // Zweite Sicherung, unabhaengig von der Zahl der Seiten: Hat dieser Lauf mehr
+    // Artikel gesehen als je einer zuvor, sind die zusaetzlichen nicht neu - wir
+    // haben nur nie so weit geschaut. Genau das passierte bei amazingtoys, als der
+    // Monitor auf die Listen-Schnittstelle umstieg und Seite 1 von 24 auf 96
+    // Artikel wuchs: 72 Artikel, die laengst im Laden standen, galten als Neuheit.
+    // Fuer Quellen ohne gemerkte Tiefe dient der bisherige Stand als Mass.
+    const known = st.depth != null ? st.depth : Object.keys(snap).length;
+    const limits = [];
+    if (win) limits.push(r.firstCount);
+    else if (deeper) limits.push(Object.keys(snap).length);
+    if (known && r.list.length > known) limits.push(known);
+    const silentFrom = limits.length ? Math.min(...limits) : null;
     const d = diff(s, r.list, snap, !!st.init, now, silentFrom);
     st.seenPages = Math.max(st.seenPages || 0, r.pages);
+    st.depth = Math.max(known, r.list.length);
     // Fenster weiterschieben; hinter der letzten Seite wieder vorne anfangen
     if (win) st.cursor = r.end ? 2 : Math.max(2, st.cursor || 2) + win;
     // Ein Schnelldurchlauf liest absichtlich nur die neuesten Seiten – das ist kein Fehler.
