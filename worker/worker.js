@@ -54,6 +54,7 @@ const MAX_PAGES = 4;          // Shopify: bis 4 x 250 Produkte pro Kollektion
 // Durchlauf kommt einmal pro Stunde und findet auch Preis- und Bestandsaenderungen
 // weiter hinten. Shops mit grossen Seiten brauchen keine Staffelung.
 const PAGE_BUDGET = {
+  wix: [1, 4],
   shopify: [4, 4],        // 250 Artikel je Seite
   woocommerce: [4, 4],    // 100 je Seite
   epages: [3, 6],         // 100 je Seite
@@ -1236,18 +1237,93 @@ async function fetchSoftridge(src, max) {
   return { list: out, pages, bytes, truncated };
 }
 
+// Wix-Shops (z. B. framicards.ch): die Seite ist eine React-App, liefert ihre Liste
+// aber im Script "wix-warmup-data" gleich mit. Die Besonderheit: ?page=N ist dort
+// keine einzelne Seite, sondern eine Menge - page=3 bringt die ersten dreimal 48
+// Artikel auf einen Schlag. Ein Abruf je Lauf genuegt also.
+const WIX_PER_PAGE = 48;
+function wixList(html) {
+  const m = html.match(/<script[^>]*id="wix-warmup-data"[^>]*>([\s\S]*?)<\/script>/);
+  if (!m) return null;
+  let j;
+  try { j = JSON.parse(m[1]); } catch (e) { return null; }
+  const find = (o, d) => {
+    if (d > 8 || !o || typeof o !== 'object') return null;
+    if (o.productsWithMetaData && Array.isArray(o.productsWithMetaData.list)) return o.productsWithMetaData;
+    for (const k of Object.keys(o)) { const r = find(o[k], d + 1); if (r) return r; }
+    return null;
+  };
+  return find(j, 0);
+}
+const isWix = (html) => !!wixList(html);
+// Name der Kategorie steht im selben Zustand.
+function wixCategory(html) {
+  const m = html.match(/"category":\{"id":"[^"]*","name":"((?:[^"\\]|\\.)*)"/);
+  try { return m ? JSON.parse('"' + m[1] + '"') : ''; } catch (e) { return ''; }
+}
+
+function wixItems(pm, base, cat) {
+  const out = [];
+  for (const p of (pm && pm.list) || []) {
+    if (!p || !p.name || !p.urlPart) continue;
+    const u = new URL('/product-page/' + p.urlPart, base).toString();
+    const t = decodeEntities(String(p.name));
+    const img = (Array.isArray(p.media) && p.media[0]) || {};
+    out.push({
+      id: String(p.id),
+      t,
+      p: p.price > 0 ? p.price : null,
+      a: p.isInStock ? 1 : 0,
+      u,
+      i: img.fullUrl || img.url || '',
+      // Die Artikelnamen bei Wix nennen das Franchise oft nicht ("30th Celebration
+      // Ditto Premium Collection"); dann entscheidet der Name der Kategorie.
+      g: franchiseOf(t + ' ' + u) || franchiseOf(cat || ''),
+      // Die Kategorie gehoert auch in den Heuhaufen, sonst wirft ein Franchise-Filter
+      // genau die Artikel weg, die der Chip daneben als Pokémon ausweist.
+      hay: t + ' ' + (p.sku || '') + ' ' + u + ' ' + (cat || ''),
+    });
+  }
+  return out;
+}
+
+const wixPageUrl = (base, n) => {
+  const u = new URL(base);
+  if (n > 1) u.searchParams.set('page', String(n)); else u.searchParams.delete('page');
+  return u.toString();
+};
+
+async function fetchWix(src, max) {
+  // max ist hier keine Seitenzahl zum Durchblaettern, sondern wie weit die eine
+  // Liste reichen soll. Normal reicht die erste Ladung (die Neusten stehen vorn),
+  // ab und zu liest ein Lauf tiefer.
+  const n = Math.max(1, Math.min(max || 1, 4));
+  const { html, bytes } = await getHtml(wixPageUrl(src.url, n));
+  const pm = wixList(html);
+  if (!pm) throw new Error(new URL(src.url).host + ': keine Produktliste gefunden');
+  const out = [];
+  for (const it of wixItems(pm, src.url, wixCategory(html))) {
+    if (passes(src, it.hay)) { delete it.hay; out.push(it); }
+  }
+  // pages meldet die Tiefe, nicht die Zahl der Abrufe: nur so merkt der Vergleich,
+  // dass dieser Lauf weiter gelesen hat, und schluckt die Nachzuegler still.
+  return { list: out, pages: n, bytes, truncated: (pm.totalCount || 0) > (pm.list || []).length };
+}
+
 const fetchSource = (src, max) => (src.item ? fetchItem(src).then((r) => { r.list.forEach((x) => { x.id = 'x'; }); return r; }) : src.type === 'wog' ? fetchWog(src) : src.type === 'woocommerce' ? fetchWoo(src, max) : src.type === 'epages' ? fetchEpages(src, max) : src.type === 'cscart' ? fetchCs(src, max) : src.type === 'sumup' ? fetchSumup(src, max) : src.type === 'shopware' ? fetchShopware(src, max)
   : src.type === 'prestashop' ? fetchPresta(src, max)
   : src.type === 'jsonld' ? fetchJsonLd(src, max)
   : src.type === 'epages6' ? fetchEpages6(src, max)
   : src.type === 'manor' ? fetchManor(src, max)
-  : src.type === 'softridge' ? fetchSoftridge(src, max) : fetchShopify(src, max));
+  : src.type === 'softridge' ? fetchSoftridge(src, max)
+  : src.type === 'wix' ? fetchWix(src, max) : fetchShopify(src, max));
 const srcKey = (s) => (s.item ? 'item:' + new URL(s.url).origin + '|' + (s.item.handle || s.item.slug || s.item.pid) + '|' + (s.item.vid || '') : s.type === 'wog' ? 'wog' : s.type === 'woocommerce' ? wooApi(s) + '#' + (s.cat || '') : s.type === 'epages' ? epagesApi(s) + '#' + (s.cat || '') : s.type === 'cscart' ? csClean(s.url) : s.type === 'sumup' ? suPageUrl(s.url, 1) : s.type === 'shopware' ? swPageUrl(s.url, 1)
   : s.type === 'prestashop' ? psPageUrl(s.url, 1, 'p', 0)
   : s.type === 'jsonld' ? ldPageUrl(s.url, 1)
   : s.type === 'epages6' ? e6PageUrl(s.url, 1)
   : s.type === 'manor' ? manorPageUrl(s.url, 1)
-  : s.type === 'softridge' ? srPageUrl(s, 1) : shopifyApi(s));
+  : s.type === 'softridge' ? srPageUrl(s, 1)
+  : s.type === 'wix' ? wixPageUrl(s.url, 1) : shopifyApi(s));
 
 
 // Shop-Typ erkennen (wog.ch, Shopify, WooCommerce) und einen lesbaren Namen bilden.
@@ -1329,6 +1405,10 @@ async function detectSource(url) {
       const site = decodeEntities((html.match(/og:site_name" content="([^"]*)"/) || [])[1] || '') || shop;
       // Query behalten: darin steckt die Sortierung „Neuste zuerst“
       return { type: 'sumup', url: withQuery, name: site, shopName: site, html };
+    }
+    if (isWix(html)) {
+      const cat = wixCategory(html);
+      return { type: 'wix', url: clean, name: cat ? shop + ' \u00b7 ' + cat : shop, shopName: shop, html };
     }
     if (isSoftridge(html)) {
       const h1 = decodeEntities(stripTags((html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/) || [])[1] || ''));
@@ -1514,6 +1594,14 @@ async function probeLink(raw) {
     const list = csItems(csHtml, u.origin).slice(0, 12);
     return { kind: 'collection', shop: det.name, source: { url: det.url },
       items: list.map((x) => ({ type: 'cscart', shop: name, title: x.t, price: x.p, a: x.a, img: x.i, url: x.u, item: { pid: x.id } })) };
+  }
+
+  if (det && det.type === 'wix') {
+    const wHtml = det.html || (await getHtml(det.url)).html;
+    const name = det.shopName || shop;
+    const list = wixItems(wixList(wHtml), det.url, wixCategory(wHtml)).slice(0, 12);
+    return { kind: 'collection', shop: name, source: { url: det.url },
+      items: list.map((x) => ({ type: 'wix', shop: name, title: x.t, price: x.p, a: x.a, img: x.i, url: x.u, item: { pid: x.id, url: x.u } })) };
   }
 
   if (det && det.type === 'softridge') {
