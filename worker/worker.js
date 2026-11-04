@@ -1224,6 +1224,12 @@ async function runWatch(env) {
         const mins = Math.round(wait / 60000);
         st.lastError = new URL(s.url).hostname + ' drosselt gerade (' + err.replace(/^.*?: /, '') + ') – nächster Versuch in '
           + (mins >= 120 ? Math.round(mins / 60) + ' Stunden' : mins + ' Minuten');
+      } else if (/HTTP 5\d\d/.test(err)) {
+        // 5xx liegt beim Shop, nicht bei uns (530 schickt Cloudflare, wenn der
+        // Laden hinter dem Schutzschild gerade nicht antwortet). Beim nächsten
+        // Lauf wird es einfach wieder versucht, der letzte Stand bleibt stehen.
+        st.lastError = new URL(s.url).hostname + ' war kurz nicht erreichbar ('
+          + err.replace(/^.*?: /, '') + ') – wird beim nächsten Lauf erneut versucht';
       } else st.lastError = err;
       state.src[s.id] = st; continue;
     }
