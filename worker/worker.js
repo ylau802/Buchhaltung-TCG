@@ -50,6 +50,19 @@ const WOG_LIST = 'https://www.wog.ch/de/index.cfm/ajax.productList';
 const WATCH_UA = 'Mozilla/5.0 (compatible; YLMonitor/1.0; +https://ylau802.github.io/Buchhaltung-TCG/)';
 const MAX_SOURCES = 100;
 const MAX_PAGES = 4;          // Shopify: bis 4 x 250 Produkte pro Kollektion
+// Seiten je Durchlauf: [schnell, vollstaendig]. Schnell laeuft jede Runde und deckt
+// die neuesten Artikel ab (die Listen sind nach "Neuste zuerst" sortiert), der volle
+// Durchlauf kommt einmal pro Stunde und findet auch Preis- und Bestandsaenderungen
+// weiter hinten. Shops mit grossen Seiten brauchen keine Staffelung.
+const PAGE_BUDGET = {
+  shopify: [4, 4],        // 250 Artikel je Seite
+  woocommerce: [4, 4],    // 100 je Seite
+  epages: [3, 6],         // 100 je Seite
+  cscart: [1, 3],         // 48 je Seite, aber ~1 MB HTML – mehr sprengt das Budget je Lauf
+  sumup: [2, 10],         // nur 16 je Seite
+  wog: [1, 1],
+};
+const FULL_EVERY = 50 * 60 * 1000;   // voller Durchlauf hoechstens stuendlich
 const EVENTS_KEEP = 500;
 // Pro Cron-Lauf: Workers-Limit sind 50 Anfragen; das Datenbudget hält die CPU-Zeit klein (Free-Tarif).
 const RUN_SUBREQ = 40;
@@ -197,11 +210,11 @@ function shopifyApi(src) {
 }
 const shopifyImg = (src) => (src ? src.replace(/(\.\w+)(\?.*)?$/, '_150x$1$2') : '');
 
-async function fetchShopify(src) {
+async function fetchShopify(src, max) {
   const base = shopifyApi(src), origin = new URL(src.url).origin;
   const out = [];
   let pages = 0, bytes = 0, truncated = false;
-  for (let page = 1; page <= MAX_PAGES; page++) {
+  for (let page = 1; page <= (max || MAX_PAGES); page++) {
     const { data, bytes: b } = await getJson(base + '?limit=250&page=' + page);
     pages++; bytes += b;
     const list = data.products;
@@ -221,7 +234,7 @@ async function fetchShopify(src) {
       });
     }
     if (list.length < 250) break;
-    if (page === MAX_PAGES) truncated = true;
+    if (page === (max || MAX_PAGES)) truncated = true;
   }
   return { list: out, pages, bytes, truncated };
 }
@@ -281,10 +294,10 @@ function wooNorm(p) {
   };
 }
 
-async function fetchWoo(src) {
+async function fetchWoo(src, max) {
   const out = [];
   let pages = 0, bytes = 0, truncated = false;
-  for (let page = 1; page <= MAX_PAGES; page++) {
+  for (let page = 1; page <= (max || MAX_PAGES); page++) {
     const { data, bytes: b } = await getJson(wooApi(src) + '/products?per_page=100&page=' + page + (src.cat ? '&category=' + src.cat : ''));
     pages++; bytes += b;
     if (!Array.isArray(data)) throw new Error(new URL(src.url).host + ': kein WooCommerce-Shop');
@@ -294,7 +307,7 @@ async function fetchWoo(src) {
       delete it.hay; out.push(it);
     }
     if (data.length < 100) break;
-    if (page === MAX_PAGES) truncated = true;
+    if (page === (max || MAX_PAGES)) truncated = true;
   }
   return { list: out, pages, bytes, truncated };
 }
@@ -327,11 +340,11 @@ function epagesNorm(p, origin) {
   };
 }
 
-async function fetchEpages(src) {
+async function fetchEpages(src, max) {
   const base = epagesApi(src), origin = new URL(src.url).origin;
   const out = [];
   let pages = 0, bytes = 0, truncated = false;
-  for (let page = 1; page <= MAX_PAGES; page++) {
+  for (let page = 1; page <= (max || MAX_PAGES); page++) {
     const { data, bytes: b } = await getJson(base + '?resultsPerPage=100&page=' + page + (src.cat ? '&categoryId=' + src.cat : ''));
     pages++; bytes += b;
     const list = data && data.products;
@@ -342,7 +355,7 @@ async function fetchEpages(src) {
       delete it.hay; out.push(it);
     }
     if (list.length < 100 || page * 100 >= Number(data.totalNumberOfProducts || 0)) break;
-    if (page === MAX_PAGES) truncated = true;
+    if (page === (max || MAX_PAGES)) truncated = true;
   }
   return { list: out, pages, bytes, truncated };
 }
@@ -391,11 +404,12 @@ function csItems(html, origin) {
   return out;
 }
 
-async function fetchCs(src) {
+async function fetchCs(src, max) {
   const origin = new URL(src.url).origin;
   const out = [], seen = new Set();
+  const lim = max || CS_MAX_PAGES;
   let url = csClean(src.url), pages = 0, bytes = 0, truncated = false;
-  for (let page = 1; page <= CS_MAX_PAGES && url; page++) {
+  for (let page = 1; page <= lim && url; page++) {
     const { html, bytes: b } = await getHtml(url);
     pages++; bytes += b;
     const list = csItems(html, origin);
@@ -407,7 +421,7 @@ async function fetchCs(src) {
     }
     const nx = html.match(/rel="next" href="([^"]+)"/);
     url = nx ? nx[1] : null;
-    if (url && page === CS_MAX_PAGES) truncated = true;
+    if (url && page === lim) truncated = true;
   }
   return { list: out, pages, bytes, truncated };
 }
@@ -439,6 +453,7 @@ function csFromHtml(html) {
 // Name, Link, Bild und Preis; "Ausverkauft" haengt als Label in der Karte.
 // 16 Produkte je Seite, darum wird die Liste nach "Neuste zuerst" sortiert.
 const SU_MAX_PAGES = 3;
+const SU_PER_PAGE = 16;   // fest, der Shop kennt keinen Parameter dafuer
 const isSumUpList = (html) => /data-analytics="product-list-item"/.test(html);
 const isSumUpProduct = (html) => /data-selector="os-theme-product-title"/.test(html);
 
@@ -483,10 +498,11 @@ function suPageUrl(raw, page) {
   return u.toString();
 }
 
-async function fetchSumup(src) {
+async function fetchSumup(src, max) {
   const out = [], seen = new Set();
+  const lim = max || SU_MAX_PAGES;
   let pages = 0, bytes = 0, truncated = false, more = true;
-  for (let page = 1; page <= SU_MAX_PAGES && more; page++) {
+  for (let page = 1; page <= lim && more; page++) {
     const { html, bytes: b } = await getHtml(suPageUrl(src.url, page));
     pages++; bytes += b;
     const list = suItems(html);
@@ -499,8 +515,10 @@ async function fetchSumup(src) {
       seen.add(it.id);
       if (passes(src, it.t + ' ' + it.u)) out.push(it);
     }
-    more = /rel="next"/.test(html);
-    if (more && page === SU_MAX_PAGES) truncated = true;
+    // rel="next" steht bei SumUp auf jeder Seite, auch auf der letzten und auf leeren –
+    // als Hinweis auf weitere Seiten taugt nur eine volle Seite.
+    more = list.length >= SU_PER_PAGE;
+    if (more && page === lim) truncated = true;
   }
   return { list: out, pages, bytes, truncated };
 }
@@ -530,7 +548,7 @@ function suProduct(html, url) {
   };
 }
 
-const fetchSource = (src) => (src.item ? fetchItem(src).then((r) => { r.list.forEach((x) => { x.id = 'x'; }); return r; }) : src.type === 'wog' ? fetchWog(src) : src.type === 'woocommerce' ? fetchWoo(src) : src.type === 'epages' ? fetchEpages(src) : src.type === 'cscart' ? fetchCs(src) : src.type === 'sumup' ? fetchSumup(src) : fetchShopify(src));
+const fetchSource = (src, max) => (src.item ? fetchItem(src).then((r) => { r.list.forEach((x) => { x.id = 'x'; }); return r; }) : src.type === 'wog' ? fetchWog(src) : src.type === 'woocommerce' ? fetchWoo(src, max) : src.type === 'epages' ? fetchEpages(src, max) : src.type === 'cscart' ? fetchCs(src, max) : src.type === 'sumup' ? fetchSumup(src, max) : fetchShopify(src, max));
 const srcKey = (s) => (s.item ? 'item:' + new URL(s.url).origin + '|' + (s.item.handle || s.item.slug || s.item.pid) + '|' + (s.item.vid || '') : s.type === 'wog' ? 'wog' : s.type === 'woocommerce' ? wooApi(s) + '#' + (s.cat || '') : s.type === 'epages' ? epagesApi(s) + '#' + (s.cat || '') : s.type === 'cscart' ? csClean(s.url) : s.type === 'sumup' ? suPageUrl(s.url, 1) : shopifyApi(s));
 
 
@@ -962,19 +980,26 @@ async function runWatch(env) {
   await Promise.all(Array.from({ length: Math.min(4, queues.length) }, async () => {
     while (next < queues.length) {
       for (const s of queues[next++]) {
-        try { results.push({ s, r: await fetchSource(s) }); } catch (e) { results.push({ s, err: e.message }); }
+        const h0 = state.src[s.id] || {};
+        const full = !h0.lastFull || Date.parse(now) - Date.parse(h0.lastFull) > FULL_EVERY;
+        const budget = PAGE_BUDGET[s.type] || PAGE_BUDGET.shopify;
+        try { results.push({ s, full, r: await fetchSource(s, budget[full ? 1 : 0]) }); }
+        catch (e) { results.push({ s, err: e.message }); }
       }
     }
   }));
 
   const events = [];
   const commits = []; // [sourceId, nextSnap, st, nEvents]
-  for (const { s, r, err } of results) {
+  for (const { s, r, err, full } of results) {
     const st = Object.assign({}, state.src[s.id], { lastCheck: now });
     if (err) { st.lastError = err; state.src[s.id] = st; continue; }
     const d = diff(s, r.list, state.snap[s.id] || {}, !!st.init, now);
-    Object.assign(st, { lastOk: now, lastError: r.truncated ? 'sehr grosse Kategorie – nur die ersten ' + r.pages + ' Seiten werden geprüft' : null,
+    // Ein Schnelldurchlauf liest absichtlich nur die neuesten Seiten – das ist kein Fehler.
+    // Gemeldet wird nur, wenn auch der volle Durchlauf nicht bis zum Ende kam.
+    Object.assign(st, { lastOk: now, lastError: full && r.truncated ? 'sehr grosse Kategorie – geprüft werden die ' + r.list.length + ' neuesten Artikel' : null,
       count: r.list.length, pages: r.pages, bytes: r.bytes, init: true });
+    if (full) st.lastFull = now;
     if (s.item && r.list[0]) st.cur = { p: r.list[0].p, a: r.list[0].a };
     commits.push([s.id, d.next, st, d.events.length]);
     events.push(...d.events);
