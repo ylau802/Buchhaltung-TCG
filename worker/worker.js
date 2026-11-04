@@ -559,8 +559,9 @@ async function detectSource(url) {
     if (/Kategorie/.test(e.message)) throw e;
   }
   // Shops ohne offene Schnittstelle: die Seite einmal holen und daraus erkennen.
-  let html = null;
-  try { ({ html } = await getHtml(clean)); } catch (e) { /* weiter */ }
+  let html = null, blocked = '';
+  try { ({ html } = await getHtml(clean)); }
+  catch (e) { if (/HTTP (40[13]|429)/.test(e.message)) blocked = e.message; }
   if (html) {
     const cat = epagesFromHtml(u.pathname, html);   // wirft bei unbekannter Kategorie
     if (cat) {
@@ -579,6 +580,10 @@ async function detectSource(url) {
       return { type: 'sumup', url: clean + (u.search || ''), name: site, shopName: site, html };
     }
   }
+  // Manche Shops (z. B. coop-city.ch) lassen gar keine automatischen Abrufe zu und
+  // antworten mit einer Captcha-Seite. Das ist kein unbekannter Shop-Typ, sondern eine
+  // bewusste Sperre des Betreibers – die Meldung soll das auch so sagen.
+  if (blocked) throw new Error(host + ' sperrt automatische Abrufe (' + blocked.replace(/^.*?: /, '') + '). Dieser Shop lässt sich nicht überwachen.');
   throw new Error('Shop-Typ nicht erkannt (unterstützt: Shopify, WooCommerce, ePages, CS-Cart, SumUp, wog.ch)');
 }
 
