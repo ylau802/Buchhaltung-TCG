@@ -168,6 +168,20 @@ async function handleFiles(request, env, url, tokenHash) {
 // getrennten KV-Einträgen: der Cron schreibt nur den Zustand, die App nur die Konfiguration.
 
 const chf = (v) => (v == null ? 'Preis folgt' : 'CHF ' + Number(v).toFixed(2));
+// Preis aus sichtbarem Text ("CHF 2'299.95", "49,90 CHF"). Zuerst die Entities
+// aufloesen: Shops schreiben das Tausender-Hochkomma gern als &#x27; oder &#039;,
+// und wer das stehen laesst, liest aus "CHF 2&#x27;299.95" glatt 299.95 heraus.
+// Danach Hochkommas und Leerzeichen weg, erst dann die Zahl suchen.
+const textPrice = (s) => {
+  // Was nach dem Aufloesen noch wie eine Entity aussieht, fliegt raus: ein
+  // uebriggebliebenes "&xyz;" mitten in der Zahl waere schlimmer als gar keines.
+  const t = decodeEntities(String(s == null ? '' : s))
+    .replace(/&[#a-z0-9]+;/gi, '').replace(/[\u2019\u2018'\u00a0\s]/g, '');
+  const m = t.match(/(\d+(?:[.,]\d{1,2})?)/);
+  if (!m) return null;
+  const n = parseFloat(m[1].replace(',', '.'));
+  return n > 0 ? n : null;
+};
 // Franchise-Katalog: eingebaute + eigene (cfg.customFr = [{ name, kw: [Stichwörter] }]).
 // Pro Quelle wählt man, welche gemeldet werden (src.fr); leer = alle Produkte.
 const BUILTIN_FR = [
@@ -314,7 +328,8 @@ const wooApi = (src) => new URL(src.url).origin + '/wp-json/wc/store/v1';
 const decodeEntities = (t) => String(t || '')
   .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCharCode(parseInt(n, 16)))   // &#xE9; = é
   .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(+n))
-  .replace(/&(amp|lt|gt|quot|nbsp|apos);/g, (_, k) => ({ amp: '&', lt: '<', gt: '>', quot: '"', nbsp: ' ', apos: "'" }[k]));
+  .replace(/&(amp|lt|gt|quot|nbsp|apos|rsquo|lsquo|ndash|mdash);/g, (_, k) =>
+    ({ amp: '&', lt: '<', gt: '>', quot: '"', nbsp: ' ', apos: "'", rsquo: '\u2019', lsquo: '\u2018', ndash: '\u2013', mdash: '\u2014' }[k]));
 const trimSlash = (p) => decodeURIComponent(p).replace(/\/+$/, '');
 
 async function wooCategoryId(src) {
@@ -542,12 +557,7 @@ const SU_PER_PAGE = 16;   // fest, der Shop kennt keinen Parameter dafuer
 const isSumUpList = (html) => /data-analytics="product-list-item"/.test(html);
 const isSumUpProduct = (html) => /data-selector="os-theme-product-title"/.test(html);
 
-const suPrice = (s) => {
-  const m = String(s || '').replace(/\u00a0/g, ' ').match(/([\d'’.,]+)\s*$/);
-  if (!m) return null;
-  const n = parseFloat(m[1].replace(/['’]/g, '').replace(',', '.'));
-  return n > 0 ? n : null;
-};
+const suPrice = textPrice;
 
 function suItems(html) {
   const out = [];
@@ -815,11 +825,7 @@ function swProduct(html, url) {
 const isPresta = (html) => (html.includes('ajax_block_product') || html.includes('js-product-miniature')) && html.includes('data-id-product=');
 const isPsListing = (html) => html.includes('class="product_list') || html.includes('id="js-product-list"');
 const isPsDetail = (html) => html.includes('itemprop="availability"') && !isPsListing(html);
-// "49,90 CHF", "CHF 5.90", auch mit Tausender-Hochkomma.
-const psPrice = (s) => {
-  const m = String(s == null ? '' : s).replace(/[\u2019'\s]/g, '').match(/(\d+(?:[.,]\d{1,2})?)/);
-  return m ? parseFloat(m[1].replace(',', '.')) : null;
-};
+const psPrice = textPrice;
 const psStock = (s) => (/InStock|PreOrder|BackOrder|LimitedAvailability/i.test(s) ? 1 : 0);
 
 function psItems(html) {
@@ -1890,6 +1896,15 @@ async function runWatch(env, only) {
   const cfg = await readCfg(env);
   const state = await readState(env);
   const pick = only && only.length ? new Set(only) : null;
+
+  // Einmalig nach dem Preis-Fix: Quellen, deren Preise als Text dastehen, still
+  // neu einlesen. Sonst meldete der naechste Lauf die Korrektur (299.95 -> 2299.95)
+  // als Preisaenderung, obwohl sich am Laden nichts geaendert hat.
+  const FIX = 'textpreis-1';
+  if (state.fix !== FIX) {
+    for (const s of cfg.sources) if (s.type === 'sumup' || s.type === 'prestashop') resetSource(state, s.id);
+    state.fix = FIX;
+  }
 
   const todo = cfg.sources.filter((s) => !s.off && (!pick || pick.has(s.id)))
     .sort((a, b) => ((state.src[a.id] || {}).lastCheck || '').localeCompare((state.src[b.id] || {}).lastCheck || ''));
