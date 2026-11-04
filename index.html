@@ -207,6 +207,7 @@ td.cell-wrap{white-space:normal;min-width:150px;max-width:280px}
   background:var(--surface-2);border:1px solid var(--line);color:var(--ink-soft)}
 .chip.c-pk{background:var(--gold-bg);border-color:var(--gold-soft);color:var(--gold)}
 .chip.c-po{background:none;border-style:dashed;border-color:var(--gold-soft);color:var(--gold-soft)}
+.chip.c-lang{font-weight:600;letter-spacing:.4px}
 tbody tr.po td{color:var(--ink-soft)}
 .rowact{display:flex;gap:4px;opacity:0;transition:opacity .12s}
 tr:hover .rowact{opacity:1}
@@ -1263,6 +1264,8 @@ function viewLager(){
 const news={data:null,loading:false,err:'',fr:'',kind:'',src:'',q:'',showSrc:false,showWatch:false,urls:'',addName:'',addNameTouched:false,addFr:[],fedit:null,ren:null,cfName:'',cfKw:'',msgs:[],auto:false,chat:[],wurls:'',wbusy:false};
 const newsCatalog=()=>(news.data&&news.data.catalog)||['Pokémon','One Piece','Dragon Ball'];
 const NEWS_KIND={new:'Neu',price:'Preis',stock:'Wieder verfügbar'};
+// Sprache, wie der Worker sie am Artikel erkannt hat (leer = steht nirgends).
+const NEWS_LANG={EN:'Englisch',DE:'Deutsch',FR:'Französisch',IT:'Italienisch',JP:'Japanisch',CN:'Chinesisch',KR:'Koreanisch',ES:'Spanisch',PT:'Portugiesisch'};
 // Ereignisse der letzten 24 h
 const newsFresh=()=>((news.data&&news.data.events)||[]).filter(e=>Date.now()-Date.parse(e.at)<864e5);
 function ago(iso){
@@ -1574,7 +1577,7 @@ function viewNews(){
       <td class="cell-wrap" data-l="" style="min-width:260px"><div style="display:flex;align-items:center;gap:10px">
         ${e.i?`<img src="${esc(e.i)}" alt="" loading="lazy" style="width:36px;height:36px;object-fit:contain;border-radius:6px;flex:none;background:#fff;padding:2px">`:''}
         <div><a href="${esc(e.u)}" target="_blank" rel="noopener" style="color:var(--ink);font-weight:500;text-decoration:none">${esc(e.t)}</a>
-          <div style="margin-top:2px"><span class="chip">${esc(e.s)}</span>${e.g?` <span class="chip ${e.g==='Pokémon'?'c-pk':''}">${esc(e.g)}</span>`:''}</div></div></div></td>
+          <div style="margin-top:2px"><span class="chip">${esc(e.s)}</span>${e.g?` <span class="chip ${e.g==='Pokémon'?'c-pk':''}">${esc(e.g)}</span>`:''}${e.l?` <span class="chip c-lang" title="${esc(NEWS_LANG[e.l]||e.l)}">${esc(e.l)}</span>`:''}</div></div></div></td>
       <td data-l="Ereignis"><span class="chip ${e.k==='new'?'c-pk':''}">${NEWS_KIND[e.k]}</span></td>
       <td data-l="Preis" class="num"><span>${price(e)}</span></td>
       <td data-l="Status"><span><span class="tag-dot" style="background:${e.a?'var(--pos)':'var(--faint)'}"></span>${e.a?'verfügbar':'ausverkauft'}</span></td>

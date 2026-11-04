@@ -177,6 +177,36 @@ const kwRegex = (kw) => new RegExp(kw.map((k) => String(k).trim().replace(/[.*+?
 let CATALOG = BUILTIN_FR.slice();
 const setCatalog = (cfg) => { CATALOG = BUILTIN_FR.concat((cfg.customFr || []).map((c) => [c.name, kwRegex(c.kw)])); };
 const franchiseOf = (hay) => (CATALOG.find(([, re]) => re.test(hay)) || [''])[0];
+// Sprache des Artikels. Die Shops schreiben sie entweder in den Namen
+// ("… - englisch", "-EN-", "Kollektion DE") oder nur in den Link
+// ("…-booster-box-franzoesisch"). Kürzel zählen nur in Grossbuchstaben, sonst
+// gäbe das "de" in einer Shop-Adresse oder das französische "de" in einem Titel
+// eine falsche Sprache.
+const LANGS = [
+  ['EN', /englisch|english|anglais|inglese/i, /(^|[^A-Za-z0-9])(EN|ENG)([^A-Za-z0-9]|$)/],
+  ['DE', /deutsch|german|allemand|tedesco/i, /(^|[^A-Za-z0-9])(DE|GER|DEU)([^A-Za-z0-9]|$)/],
+  ['FR', /franz(ö|oe)sisch|french|fran(ç|c)ais/i, /(^|[^A-Za-z0-9])(FR|FRA)([^A-Za-z0-9]|$)/],
+  ['IT', /italienisch|italian|italiano/i, /(^|[^A-Za-z0-9])(IT|ITA)([^A-Za-z0-9]|$)/],
+  ['JP', /japanisch|japanese|japonais|japan\b/i, /(^|[^A-Za-z0-9])(JP|JPN|JAP)([^A-Za-z0-9]|$)/],
+  ['CN', /chinesisch|chinese/i, /(^|[^A-Za-z0-9])(CN|CHS|CHT)([^A-Za-z0-9]|$)/],
+  ['KR', /koreanisch|korean/i, /(^|[^A-Za-z0-9])(KR|KOR)([^A-Za-z0-9]|$)/],
+  ['ES', /spanisch|spanish|espa(ñ|n)ol/i, /(^|[^A-Za-z0-9])(ES|ESP)([^A-Za-z0-9]|$)/],
+  ['PT', /portugiesisch|portuguese|portugu(ê|e)s/i, /(^|[^A-Za-z0-9])(PT|POR)([^A-Za-z0-9]|$)/],
+];
+const urlPath = (u) => { try { return decodeURIComponent(new URL(u).pathname); } catch (e) { return ''; } };
+const urlSlug = (u) => urlPath(u).replace(/\/+$/, '').split('/').pop();
+function langIn(s) {
+  let best = null;
+  for (const [code, word, abbr] of LANGS) {
+    const m = s.match(word) || s.match(abbr);
+    if (m && (best === null || m.index < best[1])) best = [code, m.index];
+  }
+  return best ? best[0] : '';
+}
+// Was am Artikel steht, schlägt den Link; der Link schlägt die Kategorie der Quelle
+// (so bekommt z. B. die Kollektion "englische-pokemon-karten" ihre Sprache).
+const langOf = (title, url, srcUrl) =>
+  langIn(title || '') || langIn(urlSlug(url || '')) || langIn(urlPath(srcUrl || '')) || '';
 const srcFr = (s) => (Array.isArray(s.fr) ? s.fr : s.filter === false ? [] : DEFAULT_FR);
 const passes = (src, hay) => { const fr = srcFr(src); return !fr.length || CATALOG.some(([n, re]) => fr.includes(n) && re.test(hay)); };
 const resetSource = (st, id) => { if (st.src[id]) delete st.src[id].init; delete st.snap[id]; }; // stilles Neu-Einlesen
@@ -1014,7 +1044,7 @@ async function sendPush(env, events, test) {
   const rest = events.slice(MAX_PUSH_EVENTS);
   const pre = test ? 'Test: ' : '';
   const msgs = single.map((e, i) => ({
-    t: clip(pre + KIND_LABEL[e.k] + (e.s ? ' · ' + e.s : ''), 80),
+    t: clip(pre + KIND_LABEL[e.k] + (e.s ? ' · ' + e.s : '') + (e.l ? ' · ' + e.l : ''), 80),
     b: clip(clip(e.t, 90) + '\n' + describe(e), 220),
     // eigener tag je Meldung, sonst ersetzen sich die Nachrichten auf dem Gerät
     g: 'ev-' + (e.k || '') + '-' + (e.id || '') + '-' + i + '-' + (e.at || Date.now()),
@@ -1050,7 +1080,7 @@ function diff(src, list, prev, init, now, silentFrom) {
     const old = prev[it.id];
     let keep = null;   // Bezugspreis, der stehen bleibt (siehe unten)
     if (init) {
-      const ev = { s: src.shop || src.name, id: it.id, t: it.t, p: it.p, a: it.a, u: it.u, i: it.i, g: it.g, at: now };
+      const ev = { s: src.shop || src.name, id: it.id, t: it.t, p: it.p, a: it.a, u: it.u, i: it.i, g: it.g, l: langOf(it.t, it.u, src.url), at: now };
       if (!old) { if (i < limit) events.push(Object.assign({ k: 'new' }, ev)); }
       else {
         const moved = old[0] != null && it.p != null ? it.p - old[0] : 0;
@@ -1086,7 +1116,7 @@ async function sendMail(env, events, test) {
   const shown = events.slice(0, 80), more = events.length - shown.length;
   const row = (ev) =>
     '<tr><td style="padding:9px 0;border-bottom:1px solid #eee">' +
-    '<span style="font-size:11px;color:#777;text-transform:uppercase">' + esc(KIND_LABEL[ev.k]) + ' · ' + esc(ev.s) + '</span><br>' +
+    '<span style="font-size:11px;color:#777;text-transform:uppercase">' + esc(KIND_LABEL[ev.k]) + ' · ' + esc(ev.s) + (ev.l ? ' · ' + esc(ev.l) : '') + '</span><br>' +
     '<a href="' + esc(ev.u) + '" style="font-size:15px;font-weight:600;color:#1a1a1a;text-decoration:none">' + esc(ev.t) + '</a><br>' +
     '<span style="color:#555;font-size:14px">' + esc(describe(ev)) + '</span><br>' +
     '<a href="' + esc(ev.u) + '" style="font-size:13px;color:#0b6bcb">' + esc(ev.u) + '</a></td></tr>';
