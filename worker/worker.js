@@ -382,7 +382,8 @@ function epagesFromHtml(pathname, html) {
 // Titel, Preis (verstecktes Feld) und Lagerzustand. Die Liste ist nach "Neuste
 // zuerst" sortiert, darum reichen fuer einen News-Monitor die ersten Seiten.
 const CS_MAX_PAGES = 2;
-const csClean = (u) => new URL(u).origin + new URL(u).pathname;
+// Query gehoert dazu: die Liste "Neueste" ist index.php?dispatch=products.newest
+const csClean = (u) => { const x = new URL(u); return x.origin + x.pathname + (x.search || ''); };
 const stripTags = (s) => decodeEntities(String(s || '').replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim());
 const isCsCart = (html) => /name="product_form_\d+"/.test(html) && /\[price\]" value=/.test(html);
 
@@ -585,8 +586,10 @@ async function detectSource(url) {
     if (/Kategorie/.test(e.message)) throw e;
   }
   // Shops ohne offene Schnittstelle: die Seite einmal holen und daraus erkennen.
+  // Mit Query – bei manchen Shops steckt die Liste genau darin.
+  const withQuery = clean + (u.search || '');
   let html = null, blocked = '';
-  try { ({ html } = await getHtml(clean)); }
+  try { ({ html } = await getHtml(withQuery)); }
   catch (e) { if (/HTTP (40[13]|429)/.test(e.message)) blocked = e.message; }
   if (html) {
     const cat = epagesFromHtml(u.pathname, html);   // wirft bei unbekannter Kategorie
@@ -598,12 +601,12 @@ async function detectSource(url) {
     if (cs) {
       const name = cs.shop || shop;
       // html/shopName nur fuer probeLink; gespeichert werden nur id/name/url/type/fr/cat
-      return { type: 'cscart', url: clean, name: cs.name ? name + ' · ' + cs.name : name, shopName: name, html };
+      return { type: 'cscart', url: withQuery, name: cs.name ? name + ' · ' + cs.name : name, shopName: name, html };
     }
     if (isSumUpList(html) || isSumUpProduct(html)) {
       const site = decodeEntities((html.match(/og:site_name" content="([^"]*)"/) || [])[1] || '') || shop;
       // Query behalten: darin steckt die Sortierung „Neuste zuerst“
-      return { type: 'sumup', url: clean + (u.search || ''), name: site, shopName: site, html };
+      return { type: 'sumup', url: withQuery, name: site, shopName: site, html };
     }
   }
   // Manche Shops (z. B. coop-city.ch) lassen gar keine automatischen Abrufe zu und
