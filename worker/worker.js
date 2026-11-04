@@ -26,7 +26,7 @@
  *   Vault (siehe oben) lehnt /files jede Anfrage ab.
  *
  * News-Monitor: ein Cron-Trigger (alle 5 Min.) prüft reihum die in der App eingetragenen
- * Shops (Shopify-Kollektionen und wog.ch), filtert auf Pokémon / One Piece / Dragon Ball,
+ * Shops (Shopify, WooCommerce, ePages und wog.ch), filtert auf Pokémon / One Piece / Dragon Ball,
  * vergleicht mit dem letzten Stand und meldet per Mail (Resend-API): neue Produkte,
  * Preisänderungen, ausverkauft -> wieder verfügbar.
  *   GET    /news                -> { sources, events, lastRun, lastError, mail }
@@ -296,8 +296,72 @@ async function fetchWoo(src) {
   return { list: out, pages, bytes, truncated };
 }
 
-const fetchSource = (src) => (src.item ? fetchItem(src).then((r) => { r.list.forEach((x) => { x.id = 'x'; }); return r; }) : src.type === 'wog' ? fetchWog(src) : src.type === 'woocommerce' ? fetchWoo(src) : fetchShopify(src));
-const srcKey = (s) => (s.item ? 'item:' + new URL(s.url).origin + '|' + (s.item.handle || s.item.slug || s.item.pid) + '|' + (s.item.vid || '') : s.type === 'wog' ? 'wog' : s.type === 'woocommerce' ? wooApi(s) + '#' + (s.cat || '') : shopifyApi(s));
+// ePages Now (z. B. calandamagic.ch): die Seite ist eine React-App, die Produkte
+// kommen aber aus einer offenen JSON-Schnittstelle:
+//   /api/v2/products?categoryId=<GUID>&resultsPerPage=100&page=1
+// Die GUID der Kategorie steht nur im eingebetteten Zustand der Kategorieseite
+// (window.__EP, Feld storeInitialState) – die wird einmal beim Anlegen gelesen.
+const epagesApi = (src) => new URL(src.url).origin + '/api/v2/products';
+
+function epagesState(html) {
+  const m = html.match(/storeInitialState:\s*"((?:[^"\\]|\\.)*)"/);
+  if (!m) return null;
+  try { return JSON.parse(JSON.parse('"' + m[1] + '"')); } catch (e) { return null; }
+}
+
+function epagesNorm(p, origin) {
+  const hay = [p.name, p.sku, (p.labels || []).map((l) => (l && l.name) || l).join(' ')].join(' ');
+  let img = (p.image && p.image.url) || '';
+  if (img && !/^https?:/.test(img)) img = origin + img;
+  if (img) img += (img.includes('?') ? '&' : '?') + 'width=150&height=150';
+  return {
+    id: String(p.productId), t: p.name,
+    // available deckt "Auf Lager" und "Jetzt vorbestellen" ab, false ist "Nicht auf Lager"
+    p: p.price && p.price.amount >= 0 ? p.price.amount : null,
+    a: p.available ? 1 : 0,
+    u: origin + '/p/' + p.slug,
+    i: img, g: franchiseOf(hay), hay,
+  };
+}
+
+async function fetchEpages(src) {
+  const base = epagesApi(src), origin = new URL(src.url).origin;
+  const out = [];
+  let pages = 0, bytes = 0, truncated = false;
+  for (let page = 1; page <= MAX_PAGES; page++) {
+    const { data, bytes: b } = await getJson(base + '?resultsPerPage=100&page=' + page + (src.cat ? '&categoryId=' + src.cat : ''));
+    pages++; bytes += b;
+    const list = data && data.products;
+    if (!Array.isArray(list)) throw new Error(new URL(src.url).host + ': kein ePages-Shop');
+    for (const p of list) {
+      const it = epagesNorm(p, origin);
+      if (!passes(src, it.hay)) continue;
+      delete it.hay; out.push(it);
+    }
+    if (list.length < 100 || page * 100 >= Number(data.totalNumberOfProducts || 0)) break;
+    if (page === MAX_PAGES) truncated = true;
+  }
+  return { list: out, pages, bytes, truncated };
+}
+
+// Kategorieseite -> { id, name, shop }. id = null bedeutet "ganzer Shop".
+// Gibt null zurueck, wenn die Seite kein ePages-Shop ist.
+async function epagesCategory(url) {
+  const u = new URL(url);
+  const { html } = await getHtml(u.origin + u.pathname);
+  const st = epagesState(html);
+  if (!st) return null;
+  const shopName = (st.shop && (st.shop.title || st.shop.name)) || '';
+  const cm = decodeURIComponent(u.pathname).match(/^\/c\/(.+?)\/*$/);
+  if (!cm) return { id: null, name: '', shop: shopName };
+  const id = (st.categorySlugsToGUIDs || {})[cm[1]];
+  if (!id) throw new Error('Kategorie nicht gefunden (URL der Kategorie-Seite verwenden)');
+  const cat = (st.categories || {})[id];
+  return { id, name: (cat && cat.title) || cm[1], shop: shopName };
+}
+
+const fetchSource = (src) => (src.item ? fetchItem(src).then((r) => { r.list.forEach((x) => { x.id = 'x'; }); return r; }) : src.type === 'wog' ? fetchWog(src) : src.type === 'woocommerce' ? fetchWoo(src) : src.type === 'epages' ? fetchEpages(src) : fetchShopify(src));
+const srcKey = (s) => (s.item ? 'item:' + new URL(s.url).origin + '|' + (s.item.handle || s.item.slug || s.item.pid) + '|' + (s.item.vid || '') : s.type === 'wog' ? 'wog' : s.type === 'woocommerce' ? wooApi(s) + '#' + (s.cat || '') : s.type === 'epages' ? epagesApi(s) + '#' + (s.cat || '') : shopifyApi(s));
 
 
 // Shop-Typ erkennen (wog.ch, Shopify, WooCommerce) und einen lesbaren Namen bilden.
@@ -327,7 +391,16 @@ async function detectSource(url) {
   } catch (e) {
     if (/Kategorie/.test(e.message)) throw e;
   }
-  throw new Error('Shop-Typ nicht erkannt (unterstützt: Shopify, WooCommerce, wog.ch)');
+  try {
+    const cat = await epagesCategory(clean);
+    if (cat) {
+      const name = cat.shop || shop;
+      return { type: 'epages', url: clean, cat: cat.id, name: cat.id ? name + ' · ' + cat.name : name };
+    }
+  } catch (e) {
+    if (/Kategorie/.test(e.message)) throw e;
+  }
+  throw new Error('Shop-Typ nicht erkannt (unterstützt: Shopify, WooCommerce, ePages, wog.ch)');
 }
 
 
@@ -383,6 +456,12 @@ async function fetchItem(src) {
     const x = wooNorm(data[0]); delete x.hay;
     return { list: [x], pages: 1, bytes };
   }
+  if (src.type === 'epages') {
+    const { data, bytes } = await getJson(epagesApi(src) + '/' + encodeURIComponent(it.pid));
+    if (!data || !data.productId) throw new Error('Produkt nicht mehr gefunden');
+    const x = epagesNorm(data, origin); delete x.hay;
+    return { list: [x], pages: 1, bytes };
+  }
   const { html, bytes } = await getHtml(src.url);
   return { list: [wogItemFromHtml(html, src.url)], pages: 1, bytes };
 }
@@ -421,6 +500,22 @@ async function probeLink(raw) {
     } catch (e) { if (/HTTP 429/.test(e.message)) throw e; }
   }
 
+  // ePages-Produkt: /p/<slug>. Die productId steht im eingebetteten Zustand,
+  // danach reicht fuer jede Pruefung die kleine JSON-Antwort zu dieser id.
+  const em = path.match(/^\/p\/(.+)$/);
+  if (em) {
+    try {
+      const { html } = await getHtml(u.origin + u.pathname);
+      const st = epagesState(html);
+      const prod = st && st.products && (st.products[em[1]] || Object.values(st.products)[0]);
+      if (prod && prod.productId) {
+        const name = (st.shop && (st.shop.title || st.shop.name)) || shop;
+        const x = epagesNorm(prod, u.origin); delete x.hay;
+        return { kind: 'product', shop: name, items: tag([x], 'epages', name, { pid: prod.productId }) };
+      }
+    } catch (e) { if (/HTTP 429/.test(e.message)) throw e; }
+  }
+
   // Kollektion / Shop (Shopify oder WooCommerce) – oder WooCommerce-Produkt
   let det;
   try { det = await detectSource(raw); } catch (e) { det = null; }
@@ -444,7 +539,11 @@ async function probeLink(raw) {
     const { data } = await getJson(wooApi({ url: det.url }) + '/products?per_page=12' + (det.cat ? '&category=' + det.cat : ''));
     return { kind: 'collection', shop: det.name, source: { url: det.url }, items: data.map((p) => { const x = wooNorm(p); return { type: 'woocommerce', shop, title: x.t, price: x.p, a: x.a, img: x.i, url: x.u, item: { slug: p.slug } }; }) };
   }
-  throw new Error('Weder Produkt noch Kollektion erkannt – unterstützt sind Shopify, WooCommerce und wog.ch');
+  if (det && det.type === 'epages') {
+    const { data } = await getJson(epagesApi({ url: det.url }) + '?resultsPerPage=12&page=1' + (det.cat ? '&categoryId=' + det.cat : ''));
+    return { kind: 'collection', shop: det.name, source: { url: det.url }, items: (data.products || []).map((p) => { const x = epagesNorm(p, u.origin); return { type: 'epages', shop: det.name, title: x.t, price: x.p, a: x.a, img: x.i, url: x.u, item: { pid: p.productId } }; }) };
+  }
+  throw new Error('Weder Produkt noch Kollektion erkannt – unterstützt sind Shopify, WooCommerce, ePages und wog.ch');
 }
 
 
