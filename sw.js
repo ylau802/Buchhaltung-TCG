@@ -1,6 +1,8 @@
 /* YL Service Worker – nur für Push-Benachrichtigungen (kein Caching: die Daten sind
    verschlüsselt und die App soll immer den aktuellen Stand laden). Der Worker schickt
-   { t: Titel, b: Text }; ein Klick öffnet die App direkt auf der News-Seite. */
+   { t: Titel, b: Text, g: Kennung }; ein Klick öffnet die App direkt auf der News-Seite.
+   g ist je Meldung verschieden, damit mehrere Nachrichten nebeneinander stehen
+   bleiben und sich nicht gegenseitig ersetzen. */
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
 
@@ -11,7 +13,7 @@ self.addEventListener('push', (event) => {
     body: d.b || 'Neue Meldungen im News-Dashboard.',
     icon: 'icons/icon-192.png',
     badge: 'icons/badge-mono-96.png',
-    tag: 'yingway-news',
+    tag: d.g || 'yl-news',
     renotify: true,
     data: { go: 'news' },
   }));

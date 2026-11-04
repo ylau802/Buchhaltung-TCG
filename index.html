@@ -1434,11 +1434,12 @@ async function pushDisable(){
   pushRefresh();
 }
 async function pushTest(){
-  try{ const r=await newsCall('/push/test','POST'); toast(`Test-Push gesendet (${r.sent}/${r.devices} Geräte)`); }
+  try{ const r=await newsCall('/push/test','POST'); const nm=r.messages||1;
+    toast(`Test-Push gesendet: ${nm} Nachricht${nm===1?'':'en'} an ${r.devices} Gerät${r.devices===1?'':'e'}`); }
   catch(e){ toast(e.message||'Fehler'); }
 }
 if('serviceWorker' in navigator&&(location.protocol==='https:'||location.hostname==='localhost')){
-  navigator.serviceWorker.register('sw.js').catch(()=>{});
+  navigator.serviceWorker.register('sw.js').then(r=>r&&r.update()).catch(()=>{});
   // Klick auf eine Benachrichtigung bei bereits offener App -> zur News-Seite
   navigator.serviceWorker.addEventListener('message',e=>{
     if(e.data&&e.data.go==='news'){ try{ history.replaceState(null,'','#news'); }catch(_){} if(session&&$('#lock').hidden) go('news'); }

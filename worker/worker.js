@@ -770,6 +770,7 @@ async function probeLink(raw) {
 const PUSH_KEY = 'watch:push';
 const VAPID_KEY = 'watch:vapid';
 const MAX_PUSH_DEVICES = 8;
+const MAX_PUSH_EVENTS = 10;   // so viele Einzelnachrichten je Lauf, der Rest kommt gebündelt
 const PUSH_HOSTS = /^https:\/\/([\w.-]+\.)?(googleapis\.com|push\.services\.mozilla\.com|push\.apple\.com|notify\.windows\.com)\//;
 const te = new TextEncoder();
 const b64u = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -817,20 +818,11 @@ async function readPush(env) {
 }
 const clip = (t, n) => (String(t).length > n ? String(t).slice(0, n - 1) + '…' : String(t));
 
-// An alle angemeldeten Geräte; tote Abos (404/410) werden entfernt.
-async function sendPush(env, events, test) {
-  const subs = await readPush(env);
-  if (!subs.length) return { devices: 0, sent: 0, failed: 0 };
-  const v = await getVapid(env);
-  const n = events.length;
-  const parts = [['new', 'neu'], ['price', 'Preis'], ['stock', 'wieder verfügbar']].map(([k, l]) => [events.filter((e) => e.k === k).length, l]).filter(([c]) => c);
-  const e0 = events[0];
-  const title = (test ? 'Test: ' : '') + (n === 1 ? KIND_LABEL[e0.k] + ' · ' + e0.s : n + ' News: ' + parts.map(([c, l]) => c + ' ' + l).join(', '));
-  const bodyText = events.slice(0, 3).map((e) => clip(e.t, 60) + ' – ' + describe(e)).join('\n') + (n > 3 ? '\n+' + (n - 3) + ' weitere' : '');
-  const payload = te.encode(JSON.stringify({ t: clip(title, 80), b: clip(bodyText, 220) }));
+// Eine Nachricht an alle angemeldeten Geräte; tote Abos (404/410) werden vermerkt.
+async function pushOne(env, subs, v, msg, dead) {
+  const payload = te.encode(JSON.stringify(msg));
   let sent = 0, failed = 0;
-  const dead = new Set();
-  await Promise.all(subs.slice(0, MAX_PUSH_DEVICES).map(async (sub) => {
+  await Promise.all(subs.map(async (sub) => {
     try {
       const res = await fetch(sub.endpoint, {
         method: 'POST',
@@ -841,8 +833,42 @@ async function sendPush(env, events, test) {
       else { failed++; if (res.status === 404 || res.status === 410) dead.add(sub.endpoint); }
     } catch (e) { failed++; }
   }));
-  if (dead.size) await env.DB.put(PUSH_KEY, JSON.stringify(subs.filter((x) => !dead.has(x.endpoint))));
-  return { devices: subs.length, sent, failed };
+  return { sent, failed };
+}
+
+// Je Meldung eine eigene Benachrichtigung – nichts wird zusammengefasst.
+// Nur wenn auf einen Schlag sehr viele Meldungen kommen, wird der Rest gebündelt:
+// sonst stünden 40 Nachrichten gleichzeitig auf dem Handy und der Worker liefe
+// in das Limit für Fremdabrufe pro Lauf.
+async function sendPush(env, events, test) {
+  const all = await readPush(env);
+  const subs = all.slice(0, MAX_PUSH_DEVICES);
+  if (!subs.length) return { devices: 0, sent: 0, failed: 0, messages: 0 };
+  const v = await getVapid(env);
+  const dead = new Set();
+  const single = events.slice(0, MAX_PUSH_EVENTS);
+  const rest = events.slice(MAX_PUSH_EVENTS);
+  const pre = test ? 'Test: ' : '';
+  const msgs = single.map((e, i) => ({
+    t: clip(pre + KIND_LABEL[e.k] + (e.s ? ' · ' + e.s : ''), 80),
+    b: clip(clip(e.t, 90) + '\n' + describe(e), 220),
+    // eigener tag je Meldung, sonst ersetzen sich die Nachrichten auf dem Gerät
+    g: 'ev-' + (e.k || '') + '-' + (e.id || '') + '-' + i + '-' + (e.at || Date.now()),
+  }));
+  if (rest.length) {
+    msgs.push({
+      t: clip(pre + '+' + rest.length + ' weitere Meldungen', 80),
+      b: clip(rest.slice(0, 3).map((e) => clip(e.t, 60)).join('\n') + (rest.length > 3 ? '\n…' : ''), 220),
+      g: 'ev-rest-' + Date.now(),
+    });
+  }
+  let sent = 0, failed = 0;
+  for (const msg of msgs) {
+    const r = await pushOne(env, subs, v, msg, dead);
+    sent += r.sent; failed += r.failed;
+  }
+  if (dead.size) await env.DB.put(PUSH_KEY, JSON.stringify(all.filter((x) => !dead.has(x.endpoint))));
+  return { devices: subs.length, sent, failed, messages: msgs.length };
 }
 
 // ---- Vergleich: neu / Preis / wieder verfügbar ----
