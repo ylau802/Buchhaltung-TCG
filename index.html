@@ -1466,7 +1466,10 @@ function viewNews(){
   if(!news.ps.checked){ news.ps.checked=true; setTimeout(pushRefresh,0); }
   if(d&&!news.auto&&d.sources.some(s=>!s.off&&!s.st)){ news.auto=true; setTimeout(()=>loadNews('/check','POST'),0); } // noch nie geprüfte Quellen
   const ALL=(d&&d.sources)||[];
-  const S=ALL.filter(s=>!s.item), W=ALL.filter(s=>s.item);
+  // Quellen und beobachtete Produkte alphabetisch, damit die Liste nicht in
+  // Hinzufüge-Reihenfolge steht und sich beim Umbenennen neu sortiert.
+  const byName=(a,b)=>String(a.name||'').localeCompare(String(b.name||''),'de',{sensitivity:'base',numeric:true});
+  const S=ALL.filter(s=>!s.item).sort(byName), W=ALL.filter(s=>s.item).sort(byName);
   const q=news.q.toLowerCase();
   const f=((d&&d.events)||[]).filter(e=>(!news.kind||e.k===news.kind)&&(!news.src||e.s===news.src)&&(!news.fr||e.g===news.fr)&&(!q||e.t.toLowerCase().includes(q)));
   const status=d?`Letzter Lauf ${d.lastRun?ago(d.lastRun):'noch nie'} · ${S.filter(s=>!s.off).length} Quellen · ${W.length} beobachtet · Mail ${d.mail?'<b class="pos">aktiv</b>':'<b class="neg">nicht eingerichtet</b>'} · Push ${d.push?`<b class="pos">${d.push} Gerät${d.push>1?'e':''}</b>`:'<b class="neg">aus</b>'}`:'';
@@ -1561,7 +1564,7 @@ function viewNews(){
     <div class="field"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4-4"/></svg>
       <input type="search" id="nQ" placeholder="Produkt suchen…" value="${esc(news.q)}"></div>
     <select id="nKind"><option value="">Alle Ereignisse</option>${Object.entries(NEWS_KIND).map(([k,l])=>`<option value="${k}" ${news.kind===k?'selected':''}>${l}</option>`).join('')}</select>
-    <select id="nSrc"><option value="">Alle Quellen</option>${[...new Set(ALL.map(s=>s.shop||s.name))].map(n=>`<option ${news.src===n?'selected':''}>${esc(n)}</option>`).join('')}</select>
+    <select id="nSrc"><option value="">Alle Quellen</option>${[...new Set(ALL.map(s=>s.shop||s.name))].sort((a,b)=>String(a).localeCompare(String(b),'de',{sensitivity:'base',numeric:true})).map(n=>`<option ${news.src===n?'selected':''}>${esc(n)}</option>`).join('')}</select>
     <select id="nFr"><option value="">Alle Franchises</option>${newsCatalog().map(k=>`<option ${news.fr===k?'selected':''}>${esc(k)}</option>`).join('')}</select>
     <span class="count" style="margin-left:auto">${status}</span>
   </div>
