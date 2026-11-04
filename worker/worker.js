@@ -26,7 +26,7 @@
  *   Vault (siehe oben) lehnt /files jede Anfrage ab.
  *
  * News-Monitor: ein Cron-Trigger (alle 5 Min.) prüft reihum die in der App eingetragenen
- * Shops (Shopify, WooCommerce, Shopware, ePages, CS-Cart, SumUp und wog.ch), filtert auf Pokémon / One Piece / Dragon Ball,
+ * Shops (Shopify, WooCommerce, Shopware, PrestaShop, ePages, CS-Cart, SumUp, JSON-LD und wog.ch), filtert auf Pokémon / One Piece / Dragon Ball,
  * vergleicht mit dem letzten Stand und meldet per Web-Push: neue Produkte,
  * Preisänderungen, ausverkauft -> wieder verfügbar.
  *   GET    /news                -> { sources, events, lastRun, lastError, push }
@@ -66,7 +66,7 @@ const FULL_EVERY = 50 * 60 * 1000;   // voller Durchlauf hoechstens stuendlich
 // HTTP 403 quittiert hat), steht Seite 1 in jedem Lauf – dort erscheinen neue Artikel –
 // und dazu ein Fenster weiter hinten, das mit jedem Lauf weiterwandert. Nach ein paar
 // Laeufen war die ganze Kategorie dran, ohne je mehr als drei Seiten am Stueck zu holen.
-const WINDOW = { cscart: 1, sumup: 2, shopware: 1 };
+const WINDOW = { cscart: 1, sumup: 2, shopware: 1, prestashop: 2, jsonld: 1 };
 const COOL_AFTER_BLOCK = 30 * 60 * 1000;  // nach der ersten Sperre; danach jeweils doppelt
 const COOL_MAX = 6 * 60 * 60 * 1000;      // laenger als sechs Stunden warten wir nie
 const HOST_PAGES = 4;                // so viele Seiten je Shop und Lauf, mehr nicht
@@ -696,8 +696,226 @@ function swProduct(html, url) {
   };
 }
 
-const fetchSource = (src, max) => (src.item ? fetchItem(src).then((r) => { r.list.forEach((x) => { x.id = 'x'; }); return r; }) : src.type === 'wog' ? fetchWog(src) : src.type === 'woocommerce' ? fetchWoo(src, max) : src.type === 'epages' ? fetchEpages(src, max) : src.type === 'cscart' ? fetchCs(src, max) : src.type === 'sumup' ? fetchSumup(src, max) : src.type === 'shopware' ? fetchShopware(src, max) : fetchShopify(src, max));
-const srcKey = (s) => (s.item ? 'item:' + new URL(s.url).origin + '|' + (s.item.handle || s.item.slug || s.item.pid) + '|' + (s.item.vid || '') : s.type === 'wog' ? 'wog' : s.type === 'woocommerce' ? wooApi(s) + '#' + (s.cat || '') : s.type === 'epages' ? epagesApi(s) + '#' + (s.cat || '') : s.type === 'cscart' ? csClean(s.url) : s.type === 'sumup' ? suPageUrl(s.url, 1) : s.type === 'shopware' ? swPageUrl(s.url, 1) : shopifyApi(s));
+// PrestaShop 1.6 und seine Abkoemmlinge (thirty bees), z. B. themanashop.ch und
+// spielezar.ch. Gemeinsam ist beiden nur das Geruest: Kacheln "ajax_block_product"
+// mit data-id-product innerhalb der Liste <div class="product_list">. Name, Preis,
+// Lagerstand und das Blaettern macht jedes Theme anders, darum wird beides versucht.
+// Nach Datum sortieren verbietet die robots.txt beider Shops (orderby, orderway, n),
+// darum liest der Monitor hier mit dem wandernden Fenster.
+const isPresta = (html) => html.includes('ajax_block_product') && html.includes('data-id-product=');
+const isPsListing = (html) => html.includes('class="product_list');
+const isPsDetail = (html) => html.includes('itemprop="availability"') && !html.includes('class="product_list');
+// "49,90 CHF", "CHF 5.90", auch mit Tausender-Hochkomma.
+const psPrice = (s) => {
+  const m = String(s == null ? '' : s).replace(/[\u2019'\s]/g, '').match(/(\d+(?:[.,]\d{1,2})?)/);
+  return m ? parseFloat(m[1].replace(',', '.')) : null;
+};
+const psStock = (s) => (/InStock|PreOrder|BackOrder|LimitedAvailability/i.test(s) ? 1 : 0);
+
+function psItems(html) {
+  const start = html.indexOf('class="product_list');
+  if (start < 0) return [];     // Startseite o. \u00c4.: lose Kacheln ohne Liste ignorieren
+  const out = [];
+  for (const chunk of html.slice(start).split('ajax_block_product').slice(1)) {
+    // Kachelgrenze. Ohne sie erbte die letzte Kachel den ganzen Rest der Seite \u2013
+    // mitsamt den Preisen aus Karussells weiter unten.
+    const cut = chunk.indexOf('</form>');
+    const c = chunk.slice(0, cut > 0 ? cut : 8000);
+    const m = (re) => { const x = c.match(re); return x ? x[1] : ''; };
+    const link = (c.match(/<a[^>]*class="(?:product_img_link|product-name|no-underline)"[^>]*>/) || [''])[0];
+    const u = (link.match(/href="([^"]+)"/) || [])[1] || '';
+    // Der sichtbare Linktext ist in manchen Themes abgeschnitten ("Sleeved..."),
+    // das title-Attribut traegt den vollen Namen.
+    const t = decodeEntities((link.match(/title="([^"]*)"/) || [])[1] || stripTags(m(/<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/)));
+    if (!u || !t) continue;
+    const av = m(/itemprop="availability"[^>]*(?:href|content)="([^"]*)"/);
+    out.push({
+      id: m(/data-id-product="(\d+)"/) || (u.match(/\/(\d+)-/) || [])[1] || u,
+      t,
+      p: psPrice(m(/itemprop="price"[^>]*content="([^"]+)"/)
+        || m(/<span[^>]*itemprop="price"[^>]*>([^<]*)</)
+        || m(/class="price_default"[^>]*>([^<]*)</)),
+      // Mikrodaten, wo vorhanden; sonst der Knopftext. "Vorausbestellen" zaehlt
+      // als verfuegbar, denn kaufen laesst es sich.
+      a: av ? psStock(av) : (/Nicht auf Lager/.test(c) ? 0 : 1),
+      u, i: m(/<img[^>]*\ssrc="([^"]+)"/),
+      g: franchiseOf(t + ' ' + u),
+      hay: t + ' ' + u,
+    });
+  }
+  return out;
+}
+
+// Geblaettert wird je nach Theme mit ?p=2 oder mit ?offset=30. Welches, verraet
+// die erste Seite selbst mit ihren eigenen Blaetter-Links.
+const psMode = (html) => (/[?&]offset=\d/.test(html) ? 'offset' : 'p');
+function psPageUrl(base, n, mode, per) {
+  const u = new URL(base);
+  u.searchParams.delete('p'); u.searchParams.delete('offset');
+  if (n > 1) {
+    if (mode === 'offset') u.searchParams.set('offset', String((n - 1) * per));
+    else u.searchParams.set('p', String(n));
+  }
+  return u.toString();
+}
+
+async function fetchPresta(src, plan) {
+  const want = Array.isArray(plan) && plan.length ? plan : [1];
+  const out = [], seen = new Set();
+  let pages = 0, bytes = 0, firstCount = 0, perPage = 0, mode = 'p', end = false;
+  for (const p of want) {
+    if (p > 1 && !perPage) break;        // ohne Seite 1 ist nicht bekannt, wie geblaettert wird
+    if (pages) await sleep(HOST_PAUSE);
+    const { html, bytes: b } = await getHtml(psPageUrl(src.url, p, mode, perPage));
+    pages++; bytes += b;
+    const list = psItems(html);
+    if (!list.length) {
+      if (p === 1) throw new Error(new URL(src.url).host + ': keine Produktliste gefunden');
+      end = true; break;
+    }
+    for (const it of list) {
+      if (seen.has(it.id)) continue;
+      seen.add(it.id);
+      if (passes(src, it.hay)) { delete it.hay; out.push(it); }
+    }
+    if (p === 1) { firstCount = out.length; perPage = list.length; mode = psMode(html); }
+    else if (list.length < perPage) { end = true; break; }   // letzte Seite war nicht voll
+  }
+  return { list: out, pages, bytes, firstCount, end };
+}
+
+// Produktseite: die Mikrodaten sind dem sichtbaren Markup vorzuziehen \u2013 unter dem
+// Produkt haengt ein Zubehoer-Karussell mit eigenen Preisen und eigenem Lagerstand.
+function psProduct(html, url) {
+  const t = decodeEntities((html.match(/itemprop="name" content="([^"]*)"/) || [])[1]
+    || stripTags((html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/) || [])[1] || ''));
+  if (!t) throw new Error('Produktseite nicht lesbar');
+  const price = psPrice((html.match(/<meta itemprop="price" content="([^"]+)"/) || [])[1]
+    || (html.match(/<span[^>]*itemprop="price"[^>]*>([^<]*)</) || [])[1]);
+  const u = (html.match(/rel="canonical" href="([^"]+)"/) || [])[1]
+    || (html.match(/property="og:url" content="([^"]+)"/) || [])[1] || url;
+  // Bild-Tag erst suchen, dann das src darin: die Attribute stehen in wechselnder
+  // Reihenfolge und ueber mehrere Zeilen verteilt.
+  const img = ((html.match(/<img[^>]*itemprop="image"[^>]*>/) || [''])[0].match(/\ssrc="([^"]+)"/) || [])[1]
+    || (html.match(/property="og:image" content="([^"]+)"/) || [])[1] || '';
+  return {
+    id: u, pid: u, t,
+    p: price > 0 ? price : null,
+    a: psStock((html.match(/itemprop="availability"[^>]*(?:href|content)="([^"]*)"/) || [])[1] || ''),
+    u, i: img,
+    g: franchiseOf(t + ' ' + u),
+  };
+}
+
+// Shops, die ihre Liste als JSON-LD mitliefern (schema.org, CollectionPage mit
+// ItemList), z. B. brack.ch. Das ist die sauberste Quelle ueberhaupt: Name, Preis,
+// Verfuegbarkeit und Bild stehen fertig da, es muss kein Markup geraten werden.
+// Geblaettert wird mit ?page=N. Weil die robots.txt dort das Sortieren verbietet
+// (sortProducts), steht die Liste in Ladensortierung - darum das wandernde Fenster.
+function ldNodes(html) {
+  const out = [];
+  for (const m of html.matchAll(/<script[^>]*application\/ld\+json[^>]*>([\s\S]*?)<\/script>/g)) {
+    let j;
+    try { j = JSON.parse(m[1]); } catch (e) { continue; }
+    for (const n of Array.isArray(j) ? j : [j]) if (n && typeof n === 'object') out.push(n);
+  }
+  return out;
+}
+function ldListOf(html) {
+  for (const n of ldNodes(html)) {
+    const l = (n.mainEntity && n.mainEntity.itemListElement) || (n['@type'] === 'ItemList' && n.itemListElement);
+    if (Array.isArray(l) && l.length) return l;
+  }
+  return null;
+}
+// Produktseite: ein Product, oder eine ProductGroup, deren Varianten die Preise tragen.
+function ldProductOf(html, url) {
+  const want = (() => { try { return new URL(url).pathname; } catch (e) { return url; } })();
+  for (const n of ldNodes(html)) {
+    const vs = Array.isArray(n.hasVariant) ? n.hasVariant : n['@type'] === 'Product' ? [n] : [];
+    if (!vs.length) continue;
+    const hit = vs.find((v) => v && v.url && (v.url === want || String(v.url).endsWith(want)));
+    const v = hit || vs[0];
+    if (v && v.name) return Object.assign({}, v, { name: v.name || n.name });
+  }
+  return null;
+}
+const isJsonLdList = (html) => !!ldListOf(html);
+const isJsonLdProduct = (html) => !ldListOf(html) && !!ldProductOf(html, '');
+
+const ldStock = (s) => (/InStock|PreOrder|BackOrder|LimitedAvailability/i.test(String(s || '')) ? 1 : 0);
+function ldOne(p, base) {
+  const off = (Array.isArray(p.offers) ? p.offers[0] : p.offers) || {};
+  const u = new URL(p.url, base).toString();
+  const t = decodeEntities(String(p.name || ''));
+  const price = Number(off.price);
+  return {
+    // Eine eigene Produktnummer liefert das JSON-LD nicht immer; die Nummer am
+    // Ende der Adresse ist stabil, sonst nimmt die Adresse selbst ihren Platz ein.
+    id: String(p.sku || p.productID || (u.match(/-(\d{5,})(?:[/?#]|$)/) || [])[1] || u),
+    t,
+    p: price > 0 ? price : null,
+    a: ldStock(off.availability),
+    u,
+    i: (Array.isArray(p.image) ? p.image[0] : p.image) || '',
+    g: franchiseOf(t + ' ' + (typeof p.brand === 'string' ? p.brand : (p.brand && p.brand.name) || '') + ' ' + u),
+    hay: t + ' ' + (p.description || '') + ' ' + u,
+  };
+}
+
+function ldItems(html, base) {
+  const out = [];
+  for (const e of ldListOf(html) || []) {
+    const p = (e && e.item) || e;
+    if (p && p.name && p.url) out.push(ldOne(p, base));
+  }
+  return out;
+}
+
+function ldPageUrl(base, n) {
+  const u = new URL(base);
+  if (n > 1) u.searchParams.set('page', String(n)); else u.searchParams.delete('page');
+  return u.toString();
+}
+
+async function fetchJsonLd(src, plan) {
+  const want = Array.isArray(plan) && plan.length ? plan : [1];
+  const out = [], seen = new Set();
+  let pages = 0, bytes = 0, firstCount = 0, perPage = 0, end = false;
+  for (const p of want) {
+    if (pages) await sleep(HOST_PAUSE);
+    const { html, bytes: b } = await getHtml(ldPageUrl(src.url, p));
+    pages++; bytes += b;
+    const list = ldItems(html, src.url);
+    if (!list.length) {
+      if (p === 1) throw new Error(new URL(src.url).host + ': keine Produktliste gefunden');
+      end = true; break;
+    }
+    for (const it of list) {
+      if (seen.has(it.id)) continue;
+      seen.add(it.id);
+      if (passes(src, it.hay)) { delete it.hay; out.push(it); }
+    }
+    if (p === 1) { firstCount = out.length; perPage = list.length; }
+    else if (list.length < perPage) { end = true; break; }   // letzte Seite war nicht voll
+  }
+  return { list: out, pages, bytes, firstCount, end };
+}
+
+function ldProduct(html, url) {
+  const p = ldProductOf(html, url);
+  if (!p) throw new Error('Produktseite nicht lesbar');
+  const x = ldOne(p, url);
+  delete x.hay;
+  return Object.assign(x, { id: x.u, pid: x.u });
+}
+
+const fetchSource = (src, max) => (src.item ? fetchItem(src).then((r) => { r.list.forEach((x) => { x.id = 'x'; }); return r; }) : src.type === 'wog' ? fetchWog(src) : src.type === 'woocommerce' ? fetchWoo(src, max) : src.type === 'epages' ? fetchEpages(src, max) : src.type === 'cscart' ? fetchCs(src, max) : src.type === 'sumup' ? fetchSumup(src, max) : src.type === 'shopware' ? fetchShopware(src, max)
+  : src.type === 'prestashop' ? fetchPresta(src, max)
+  : src.type === 'jsonld' ? fetchJsonLd(src, max) : fetchShopify(src, max));
+const srcKey = (s) => (s.item ? 'item:' + new URL(s.url).origin + '|' + (s.item.handle || s.item.slug || s.item.pid) + '|' + (s.item.vid || '') : s.type === 'wog' ? 'wog' : s.type === 'woocommerce' ? wooApi(s) + '#' + (s.cat || '') : s.type === 'epages' ? epagesApi(s) + '#' + (s.cat || '') : s.type === 'cscart' ? csClean(s.url) : s.type === 'sumup' ? suPageUrl(s.url, 1) : s.type === 'shopware' ? swPageUrl(s.url, 1)
+  : s.type === 'prestashop' ? psPageUrl(s.url, 1, 'p', 0)
+  : s.type === 'jsonld' ? ldPageUrl(s.url, 1) : shopifyApi(s));
 
 
 // Shop-Typ erkennen (wog.ch, Shopify, WooCommerce) und einen lesbaren Namen bilden.
@@ -754,17 +972,36 @@ async function detectSource(url) {
         || stripTags((html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/) || [])[1]) || shop;
       return { type: 'shopware', url: withQuery, name: site, shopName: site, html };
     }
+    if (isPresta(html)) {
+      // Den Zaehler aus der Ueberschrift werfen ("Es gibt 187 Artikel."),
+      // der hat im Namen der Quelle nichts verloren.
+      const h1 = decodeEntities(stripTags(((html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/) || [])[1] || '')
+        .replace(/<span[^>]*class="[^"]*counter[^"]*"[\s\S]*?<\/span>/g, '')));
+      // Auf einer Produktseite ist die h1 der Produktname; die taugt nicht als Quellenname.
+      const label = isPsListing(html) && h1 ? shop + ' \u00b7 ' + h1 : shop;
+      return { type: 'prestashop', url: clean, name: label, shopName: shop, html };
+    }
     if (isSumUpList(html) || isSumUpProduct(html)) {
       const site = decodeEntities((html.match(/og:site_name" content="([^"]*)"/) || [])[1] || '') || shop;
       // Query behalten: darin steckt die Sortierung „Neuste zuerst“
       return { type: 'sumup', url: withQuery, name: site, shopName: site, html };
+    }
+    // Zuletzt: liefert der Shop seine Liste als JSON-LD mit? Das koennen auch
+    // Laeden, deren Markup wir nicht kennen.
+    if (isJsonLdList(html) || isJsonLdProduct(html)) {
+      const u2 = new URL(withQuery);
+      // Sortieren verbietet brack.ch in seiner robots.txt; geblaettert wird ohnehin selbst.
+      u2.searchParams.delete('sortProducts'); u2.searchParams.delete('page');
+      const h1 = decodeEntities(stripTags((html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/) || [])[1] || ''));
+      const label = isJsonLdList(html) && h1 ? shop + ' \u00b7 ' + h1 : shop;
+      return { type: 'jsonld', url: u2.toString(), name: label, shopName: shop, html };
     }
   }
   // Manche Shops (z. B. coop-city.ch) lassen gar keine automatischen Abrufe zu und
   // antworten mit einer Captcha-Seite. Das ist kein unbekannter Shop-Typ, sondern eine
   // bewusste Sperre des Betreibers – die Meldung soll das auch so sagen.
   if (blocked) throw new Error(host + ' sperrt automatische Abrufe (' + blocked.replace(/^.*?: /, '') + '). Dieser Shop lässt sich nicht überwachen.');
-  throw new Error('Shop-Typ nicht erkannt (unterstützt: Shopify, WooCommerce, Shopware, ePages, CS-Cart, SumUp, wog.ch)');
+  throw new Error('Shop-Typ nicht erkannt (unterstützt: Shopify, WooCommerce, Shopware, PrestaShop, ePages, CS-Cart, SumUp, JSON-LD, wog.ch)');
 }
 
 
@@ -838,6 +1075,14 @@ async function fetchItem(src) {
     const { html, bytes } = await getHtml(src.url);
     return { list: [swProduct(html, src.url)], pages: 1, bytes };
   }
+  if (src.type === 'prestashop') {
+    const { html, bytes } = await getHtml(src.url);
+    return { list: [psProduct(html, src.url)], pages: 1, bytes };
+  }
+  if (src.type === 'jsonld') {
+    const { html, bytes } = await getHtml(src.url);
+    return { list: [ldProduct(html, src.url)], pages: 1, bytes };
+  }
   const { html, bytes } = await getHtml(src.url);
   return { list: [wogItemFromHtml(html, src.url)], pages: 1, bytes };
 }
@@ -910,6 +1155,30 @@ async function probeLink(raw) {
       items: list.map((x) => ({ type: 'cscart', shop: name, title: x.t, price: x.p, a: x.a, img: x.i, url: x.u, item: { pid: x.id } })) };
   }
 
+  if (det && det.type === 'jsonld') {
+    const ldHtml = det.html || (await getHtml(det.url)).html;
+    const name = det.shopName || shop;
+    if (!isJsonLdList(ldHtml)) {
+      const x = ldProduct(ldHtml, det.url);
+      return { kind: 'product', shop: name, items: tag([x], 'jsonld', name, { pid: x.pid }) };
+    }
+    const list = ldItems(ldHtml, det.url).slice(0, 12);
+    return { kind: 'collection', shop: name, source: { url: det.url },
+      items: list.map((x) => ({ type: 'jsonld', shop: name, title: x.t, price: x.p, a: x.a, img: x.i, url: x.u, item: { pid: x.id, url: x.u } })) };
+  }
+
+  if (det && det.type === 'prestashop') {
+    const psHtml = det.html || (await getHtml(det.url)).html;
+    const name = det.shopName || shop;
+    if (isPsDetail(psHtml)) {
+      const x = psProduct(psHtml, det.url);
+      return { kind: 'product', shop: name, items: tag([x], 'prestashop', name, { pid: x.pid }) };
+    }
+    const list = psItems(psHtml).slice(0, 12);
+    return { kind: 'collection', shop: name, source: { url: det.url },
+      items: list.map((x) => ({ type: 'prestashop', shop: name, title: x.t, price: x.p, a: x.a, img: x.i, url: x.u, item: { pid: x.id, url: x.u } })) };
+  }
+
   if (det && det.type === 'shopware') {
     const swHtml = det.html || (await getHtml(det.url)).html;
     const name = det.shopName || shop;
@@ -957,7 +1226,7 @@ async function probeLink(raw) {
     const { data } = await getJson(epagesApi({ url: det.url }) + '?resultsPerPage=12&page=1' + (det.cat ? '&categoryId=' + det.cat : ''));
     return { kind: 'collection', shop: det.name, source: { url: det.url }, items: (data.products || []).map((p) => { const x = epagesNorm(p, u.origin); return { type: 'epages', shop: det.name, title: x.t, price: x.p, a: x.a, img: x.i, url: x.u, item: { pid: p.productId } }; }) };
   }
-  throw new Error('Weder Produkt noch Kollektion erkannt – unterstützt sind Shopify, WooCommerce, Shopware, ePages, CS-Cart, SumUp und wog.ch');
+  throw new Error('Weder Produkt noch Kollektion erkannt – unterstützt sind Shopify, WooCommerce, Shopware, PrestaShop, ePages, CS-Cart, SumUp, JSON-LD und wog.ch');
 }
 
 
