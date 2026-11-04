@@ -311,12 +311,24 @@ const trimSlash = (p) => decodeURIComponent(p).replace(/\/+$/, '');
 async function wooCategoryId(src) {
   const path = trimSlash(new URL(src.url).pathname);
   if (!path || /^\/(shop|produkte|products)$/i.test(path)) return null; // ganzer Shop
-  for (let page = 1; page <= 3; page++) {
-    const { data } = await getJson(wooApi(src) + '/products/categories?per_page=100&page=' + page);
-    if (!Array.isArray(data)) break;
-    const c = data.find((x) => trimSlash(new URL(x.permalink).pathname) === path);
-    if (c) return { id: c.id, name: decodeEntities(c.name) };
-    if (data.length < 100) break;
+  try {
+    for (let page = 1; page <= 3; page++) {
+      const { data } = await getJson(wooApi(src) + '/products/categories?per_page=100&page=' + page);
+      if (!Array.isArray(data)) break;
+      const c = data.find((x) => trimSlash(new URL(x.permalink).pathname) === path);
+      if (c) return { id: c.id, name: decodeEntities(c.name) };
+      if (data.length < 100) break;
+    }
+  } catch (e) {
+    // Manche Laeden sperren die Kategorie-Liste (theuncommonshop.ch antwortet mit 403).
+    // Die Produktliste nimmt aber auch den Kurznamen aus der Adresse statt der Nummer.
+    // Einmal nachfragen, ob damit wirklich etwas kommt - sonst stuende hier spaeter
+    // eine Quelle, die stillschweigend nichts findet.
+    const slug = path.split('/').filter(Boolean).pop() || '';
+    if (slug) {
+      const { data } = await getJson(wooApi(src) + '/products?per_page=1&category=' + encodeURIComponent(slug));
+      if (Array.isArray(data) && data.length) return { id: slug, name: slug };
+    }
   }
   throw new Error('Kategorie nicht gefunden (URL der Kategorie-Seite verwenden)');
 }
@@ -334,9 +346,19 @@ function wooNorm(p) {
 
 async function fetchWoo(src, max) {
   const out = [];
-  let pages = 0, bytes = 0, truncated = false;
+  let pages = 0, bytes = 0, truncated = false, per = 100;
   for (let page = 1; page <= (max || MAX_PAGES); page++) {
-    const { data, bytes: b } = await getJson(wooApi(src) + '/products?per_page=100&page=' + page + (src.cat ? '&category=' + src.cat : ''));
+    let data, b;
+    try {
+      ({ data, bytes: b } = await getJson(wooApi(src) + '/products?per_page=' + per + '&page=' + page
+        + (src.cat ? '&category=' + encodeURIComponent(src.cat) : '')));
+    } catch (e) {
+      // Manche Laeden lassen hundert Artikel auf einen Schlag nicht zu und antworten
+      // mit 403 (theuncommonshop.ch tut das, fuenfzig gehen dort anstandslos).
+      // Dann eben in kleineren Haeppchen weiter - einmal, danach gilt der Fehler.
+      if (per === 100 && /HTTP 403/.test(e.message)) { per = 50; pages++; page--; continue; }
+      throw e;
+    }
     pages++; bytes += b;
     if (!Array.isArray(data)) throw new Error(new URL(src.url).host + ': kein WooCommerce-Shop');
     for (const p of data) {
@@ -344,7 +366,7 @@ async function fetchWoo(src, max) {
       if (!passes(src, it.hay)) continue;
       delete it.hay; out.push(it);
     }
-    if (data.length < 100) break;
+    if (data.length < per) break;
     if (page === (max || MAX_PAGES)) truncated = true;
   }
   return { list: out, pages, bytes, truncated };
