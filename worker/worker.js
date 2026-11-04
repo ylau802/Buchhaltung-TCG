@@ -68,8 +68,10 @@ const FULL_EVERY = 50 * 60 * 1000;   // voller Durchlauf hoechstens stuendlich
 // und dazu ein Fenster weiter hinten, das mit jedem Lauf weiterwandert. Nach ein paar
 // Laeufen war die ganze Kategorie dran, ohne je mehr als drei Seiten am Stueck zu holen.
 const WINDOW = { cscart: 1, sumup: 2, shopware: 1 };
-const COOL_AFTER_BLOCK = 30 * 60 * 1000;  // nach 403/429 so lange nicht wieder anklopfen
-const HOST_PAUSE = 1200;             // Pause zwischen zwei Anfragen an denselben Shop
+const COOL_AFTER_BLOCK = 30 * 60 * 1000;  // nach der ersten Sperre; danach jeweils doppelt
+const COOL_MAX = 6 * 60 * 60 * 1000;      // laenger als sechs Stunden warten wir nie
+const HOST_PAGES = 4;                // so viele Seiten je Shop und Lauf, mehr nicht
+const HOST_PAUSE = 2000;             // Pause zwischen zwei Anfragen an denselben Shop
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const EVENTS_KEEP = 500;
 // Pro Cron-Lauf: Workers-Limit sind 50 Anfragen; das Datenbudget hält die CPU-Zeit klein (Free-Tarif).
@@ -1120,13 +1122,21 @@ async function runWatch(env) {
   const batch = [];
   let pagesLeft = RUN_SUBREQ, bytesLeft = RUN_BYTES;
   const tNow = Date.parse(now);
+  // Je Shop gilt ein eigenes Budget: mehrere Quellen desselben Ladens teilen es sich,
+  // der Rest kommt im naechsten Lauf dran (die am laengsten ungeprueften zuerst).
+  // Sonst fragt der Monitor bei sechs Quellen eines Shops zwoelfmal in fuenf Minuten an,
+  // und genau das quittiert goodgamesbern.ch mit HTTP 403.
+  const perHost = new Map();
   for (const s of todo) {
     const h = state.src[s.id] || {};
     // Hat der Shop gerade dichtgemacht, erst nach der Ruhepause wieder anklopfen.
     if (h.cool && tNow < Date.parse(h.cool)) continue;
     const pg = h.pages || 1, by = h.bytes || 300000;
+    const host = new URL(s.url).hostname;
+    const used = perHost.get(host) || 0;
+    if (used && used + pg > HOST_PAGES) continue;
     if (batch.length && (pg > pagesLeft || by > bytesLeft)) continue;
-    batch.push(s); pagesLeft -= pg; bytesLeft -= by;
+    batch.push(s); pagesLeft -= pg; bytesLeft -= by; perHost.set(host, used + pg);
   }
 
   // Höchstens 4 gleichzeitig: Shopify & Co. drosseln (HTTP 429), wenn eine IP viele Shops auf einmal abfragt.
@@ -1175,10 +1185,15 @@ async function runWatch(env) {
     const st = Object.assign({}, state.src[s.id], { lastCheck: now });
     if (err) {
       if (/HTTP (40[13]|429)/.test(err)) {
-        // Der Shop drosselt uns. Nicht weiter anklopfen, sondern eine Weile ruhen –
-        // der zuletzt bekannte Stand der Quelle bleibt unveraendert stehen.
-        st.cool = new Date(Date.parse(now) + COOL_AFTER_BLOCK).toISOString();
-        st.lastError = new URL(s.url).hostname + ' drosselt gerade (' + err.replace(/^.*?: /, '') + ') – nächster Versuch in einer halben Stunde';
+        // Der Shop drosselt uns. Nicht weiter anklopfen, sondern ruhen – und bei jeder
+        // weiteren Sperre doppelt so lange. Der zuletzt bekannte Stand bleibt stehen.
+        const n = Math.min((st.coolN || 0) + 1, 5);
+        const wait = Math.min(COOL_AFTER_BLOCK * Math.pow(2, n - 1), COOL_MAX);
+        st.coolN = n;
+        st.cool = new Date(Date.parse(now) + wait).toISOString();
+        const mins = Math.round(wait / 60000);
+        st.lastError = new URL(s.url).hostname + ' drosselt gerade (' + err.replace(/^.*?: /, '') + ') – nächster Versuch in '
+          + (mins >= 120 ? Math.round(mins / 60) + ' Stunden' : mins + ' Minuten');
       } else st.lastError = err;
       state.src[s.id] = st; continue;
     }
@@ -1203,6 +1218,7 @@ async function runWatch(env) {
     // alle Quellen eines Shops immer im selben Lauf in die Tiefe gehen.
     else if (!st.lastFull) st.lastFull = new Date(Date.parse(now) - Math.floor(Math.random() * FULL_EVERY)).toISOString();
     if (st.cool) delete st.cool;
+    if (st.coolN) delete st.coolN;
     if (s.item && r.list[0]) st.cur = { p: r.list[0].p, a: r.list[0].a };
     commits.push([s.id, d.next, st, d.events.length]);
     events.push(...d.events);
