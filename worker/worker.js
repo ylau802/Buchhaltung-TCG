@@ -47,6 +47,11 @@ const MAX_FILE_BYTES = 20 * 1024 * 1024;
 
 const WOG_LIST = 'https://www.wog.ch/de/index.cfm/ajax.productList';
 const WATCH_UA = 'Mozilla/5.0 (compatible; YLMonitor/1.0; +https://ylau802.github.io/Buchhaltung-TCG/)';
+// Antworten, mit denen ein Shop automatische Abrufe abweist. Neben den ueblichen
+// 401/403/429 gehoert 510 dazu: so meldet sich die Firewall von
+// thesecretcardshop.ch ("Access denied by security policy"), und 451 und 406
+// benutzen andere Schutzmodule fuer dasselbe.
+const BLOCKED = /HTTP (401|403|406|429|451|510)/;
 const MAX_SOURCES = 400;
 const MAX_PAGES = 4;          // Shopify: bis 4 x 250 Produkte pro Kollektion
 // Seiten je Durchlauf: [schnell, vollstaendig]. Schnell laeuft jede Runde und deckt
@@ -1375,7 +1380,7 @@ async function detectSource(url) {
   const withQuery = clean + (u.search || '');
   let html = null, blocked = '';
   try { ({ html } = await getHtml(withQuery)); }
-  catch (e) { if (/HTTP (40[13]|429)/.test(e.message)) blocked = e.message; }
+  catch (e) { if (BLOCKED.test(e.message)) blocked = e.message; }
   if (html) {
     if (isEpages6(html)) {
       // Die Adresse auf den Shop-Einstieg bringen; sonst wird jeder Parameter ignoriert.
@@ -1956,7 +1961,7 @@ async function runWatch(env, only) {
   for (const { s, r, err, full, win } of results) {
     const st = Object.assign({}, state.src[s.id], { lastCheck: now });
     if (err) {
-      if (/HTTP (40[13]|429)/.test(err)) {
+      if (BLOCKED.test(err)) {
         // Der Shop drosselt uns. Nicht weiter anklopfen, sondern ruhen – und bei jeder
         // weiteren Sperre doppelt so lange. Der zuletzt bekannte Stand bleibt stehen.
         const n = Math.min((st.coolN || 0) + 1, 5);
