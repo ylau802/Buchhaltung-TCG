@@ -135,6 +135,7 @@ main{padding:0;min-width:0}
 /* ---------- KPI ---------- */
 .kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:14px}
 .kpis.kpis-4{grid-template-columns:repeat(4,1fr)}
+.kpis.kpis-3{grid-template-columns:repeat(3,1fr)}
 .kpi{background:var(--surface);border:1px solid var(--line);border-radius:12px;
   padding:14px 15px;display:flex;flex-direction:column;gap:7px;min-width:0}
 .kpi .lbl{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);
@@ -151,6 +152,8 @@ main{padding:0;min-width:0}
 .card h2{font-size:16px;margin-bottom:2px}
 .card .cap{color:var(--muted);font-size:12px;margin-bottom:14px}
 .card-row{display:grid;grid-template-columns:1.6fr 1fr;gap:14px}
+.card-row.even{grid-template-columns:1fr 1fr}
+tr.sumrow td{border-top:1px solid var(--line);background:var(--surface-2)}
 .legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--muted);margin-top:6px}
 .legend span{display:inline-flex;align-items:center;gap:6px}
 .swatch{width:11px;height:11px;border-radius:3px;flex:none}
@@ -307,9 +310,9 @@ thead th:first-child,thead th:last-child{z-index:4}
   .topbar-brand{font-size:14px}
   main{min-width:0}
   .wrap{padding:20px 14px 64px;max-width:100%}
-  .kpis,.kpis.kpis-4{grid-template-columns:repeat(2,1fr)}
+  .kpis,.kpis.kpis-4,.kpis.kpis-3{grid-template-columns:repeat(2,1fr)}
   .kpi .v{font-size:19px}
-  .card-row{grid-template-columns:1fr}
+  .card-row,.card-row.even{grid-template-columns:1fr}
   .phead{gap:10px}
   .phead h1{font-size:22px}
   .toolbar{gap:7px}
@@ -798,6 +801,8 @@ const NAV=[
   ['warenausgang','Ausgänge','M12 19V5M5 12l7-7 7 7'],
   ['laufende_kosten','Laufende Kosten','M3 6h18M3 12h18M3 18h12'],
   ['lager','Lager','M3 7l9-4 9 4-9 4-9-4zM3 7v10l9 4 9-4V7'],
+  ['erfolg','Erfolgsrechnung','M4 19V5m0 14h16M8 15l3-4 3 3 4-6'],
+  ['bilanz','Bilanz','M12 4v16M5 8h14M7 8l-3 6h6zM17 8l-3 6h6z',true],
   ['news','News','M4 5h13a2 2 0 012 2v12H6a2 2 0 01-2-2V5zM19 9h2v8a2 2 0 01-2 2M8 9h7M8 13h7'],
   ['find','Suche','M11 18a7 7 0 110-14 7 7 0 010 14zM21 21l-4.3-4.3',true],
 ];
@@ -846,6 +851,8 @@ function draw(){
   else if(route==='lager') v.innerHTML=viewLager();
   else if(route==='news') v.innerHTML=viewNews();
   else if(route==='find') v.innerHTML=viewFind();
+  else if(route==='erfolg') v.innerHTML=viewErfolg();
+  else if(route==='bilanz') v.innerHTML=viewBilanz();
   else v.innerHTML=viewLedger(route);
   wire();
   if(route==='overview') drawChart();
@@ -1261,6 +1268,203 @@ function viewLager(){
   </table></div>
   <p class="chart-hint" style="margin-top:10px">Ø EK/Stk = gesamte Einkaufskosten (brutto) einer SKU geteilt durch die gesamte eingekaufte Menge.
   Warenwert und Rohertrag verwenden diesen Durchschnitt. Bei negativem Bestand stimmen Ein- oder Ausgänge nicht überein.</p>`;
+}
+
+/* ---------- Abschluss: Erfolgsrechnung und Bilanz ---------- */
+// Beide Ansichten rechnen bei jedem Zeichnen neu aus dem Journal. Es gibt keinen
+// gespeicherten Abschluss, der veralten könnte: eine neue Buchung ist sofort drin.
+//
+// Zwei Dinge sind hier bewusst anders als in der Übersicht:
+//  • Warenaufwand ist nicht der Einkauf des Zeitraums, sondern was von der
+//    verkauften Ware tatsächlich gekostet hat (Durchschnittspreis je SKU).
+//    Nur so stimmt der Bruttogewinn.
+//  • Offene Preorders sind kein Aufwand, sondern eine Anzahlung an den
+//    Lieferanten – also ein Vermögenswert, bis die Ware eintrifft.
+const WARENDRITTEL=1/3;
+const KONTO_KAT={Verpackung:'4400',Versand:'4500',Paketstation:'4500',Aufbewahrung:'6000',
+  'Büromaterial':'6500',Abo:'6500','Gebühren':'6940',Sonstiges:'6700'};
+const kontoFor=c=>KONTO_KAT[c]||'6700';
+const netOf=r=>num(r.net)||(num(r.price)+num(r.cust)-num(r.fees)-num(r.porto));
+
+function abschluss(){
+  const ms=periodMonths();
+  const alle=allMonths();
+  const bis=ms.length?ms[ms.length-1]:(alle.length?alle[alle.length-1]:YM(new Date().toISOString()));
+  const vor=ms.length?ms[0]:null;                       // erster Monat des Zeitraums
+  const upTo=ym=>r=>(r._ym||'')<=ym;
+  const inP=r=>period==='all'?true:ms.includes(r._ym);
+
+  const aus=rows('warenausgang'), ein=rows('wareneingang'),
+        kos=rows('laufende_kosten'), pre=rows('preorder');
+
+  // Durchschnittlicher Einstandspreis je SKU, aus allen Einkäufen bis zum Stichtag.
+  const stueck=(ym)=>{
+    const b=new Map();
+    for(const r of ein.filter(upTo(ym))){ const k=r.sku||r.set||'—';
+      const o=b.get(k)||{q:0,c:0}; o.q+=num(r.qty); o.c+=num(r.gross); b.set(k,o); }
+    const u=new Map(); for(const [k,o] of b) u.set(k,o.q?o.c/o.q:0);
+    return {b,u};
+  };
+  // Lagerwert zu Einstandspreisen an einem Stichtag.
+  const bestandAm=(ym)=>{
+    if(!ym) return 0;
+    const {b,u}=stueck(ym);
+    const verkauft=new Map();
+    for(const r of aus.filter(upTo(ym))){ const k=r.sku||r.set||'—';
+      verkauft.set(k,(verkauft.get(k)||0)+num(r.qty)); }
+    let w=0;
+    for(const [k,o] of b){ const st=o.q-(verkauft.get(k)||0); if(st>0) w+=st*(u.get(k)||0); }
+    return w;
+  };
+
+  // --- Erfolgsrechnung über den gewählten Zeitraum ---
+  const vp=aus.filter(inP);
+  const erloes=vp.reduce((s,r)=>s+num(r.price),0);
+  const versandKd=vp.reduce((s,r)=>s+num(r.cust),0);
+  const gebuehren=vp.reduce((s,r)=>s+num(r.fees),0);
+  const porto=vp.reduce((s,r)=>s+num(r.porto),0);
+  const nettoerloes=erloes+versandKd-gebuehren-porto;
+
+  const {u:unitBis}=stueck(bis);
+  const wareneinsatz=vp.reduce((s,r)=>s+num(r.qty)*(unitBis.get(r.sku||r.set||'—')||0),0);
+  const bruttogewinn=nettoerloes-wareneinsatz;
+
+  const kat={};
+  for(const r of kos.filter(inP)){ const c=r.cat||'Sonstiges'; kat[c]=(kat[c]||0)+num(r.total); }
+  const katListe=Object.entries(kat).sort((a,b)=>b[1]-a[1]);
+  const betriebsaufwand=katListe.reduce((s,[,v])=>s+v,0);
+  const betriebsergebnis=bruttogewinn-betriebsaufwand;
+
+  // Warendrittel: steuerlich zulässige Unterbewertung des Lagers. In der
+  // Erfolgsrechnung zählt nur die Veränderung der Reserve im Zeitraum.
+  const bestandEnde=bestandAm(bis);
+  const vorMonat=vor?(alle.filter(m=>m<vor).slice(-1)[0]||null):null;
+  const bestandStart=period==='all'?0:bestandAm(vorMonat);
+  const reserveEnde=bestandEnde*WARENDRITTEL, reserveStart=bestandStart*WARENDRITTEL;
+  const reserveDelta=reserveEnde-reserveStart;        // Bildung mindert den Gewinn
+  const ergebnisSteuer=betriebsergebnis-reserveDelta;
+
+  // --- Bilanz auf den Stichtag ---
+  const anzahlungen=pre.filter(upTo(bis)).reduce((s,r)=>s+num(r.gross),0);
+  const einnahmen=aus.filter(upTo(bis)).reduce((s,r)=>s+netOf(r),0);
+  const einkaeufe=ein.filter(upTo(bis)).reduce((s,r)=>s+num(r.gross),0);
+  const kostenAll=kos.filter(upTo(bis)).reduce((s,r)=>s+num(r.total),0);
+  const fluessig=einnahmen-einkaeufe-kostenAll-anzahlungen;
+
+  // Kumuliertes Ergebnis bis zum Stichtag (dasselbe Rechenwerk, nur ohne Zeitraum)
+  const vAll=aus.filter(upTo(bis));
+  const nettoAll=vAll.reduce((s,r)=>s+netOf(r),0);
+  const einsatzAll=vAll.reduce((s,r)=>s+num(r.qty)*(unitBis.get(r.sku||r.set||'—')||0),0);
+  const gewinnAll=nettoAll-einsatzAll-kostenAll;
+
+  // Datenqualitaet: Verkaeufe ohne passenden Wareneingang kosten rechnerisch nichts
+  // und blaehen den Bruttogewinn auf. Das faellt sonst niemandem auf.
+  const gekauft=stueck(bis).b;
+  const ohneEingang=[...new Set(vAll.filter(r=>!gekauft.has(r.sku||r.set||'—')).map(r=>r.sku||r.set||'—'))];
+
+  const aktiven=fluessig+anzahlungen+bestandEnde-reserveEnde;
+  const passiven=gewinnAll-reserveEnde;
+  return {bis,vor,erloes,versandKd,gebuehren,porto,nettoerloes,wareneinsatz,bruttogewinn,
+    katListe,betriebsaufwand,betriebsergebnis,bestandEnde,bestandStart,reserveEnde,reserveStart,
+    reserveDelta,ergebnisSteuer,anzahlungen,fluessig,gewinnAll,aktiven,passiven,ohneEingang,
+    diff:+(aktiven-passiven).toFixed(2)};
+}
+
+const kRow=(k,t,v,cls)=>`<tr class="${cls||''}"><td class="mono">${k||''}</td><td>${t}</td>
+  <td class="num">${v==null?'':CHF(v)}</td></tr>`;
+const kSum=(t,v)=>`<tr class="sumrow"><td></td><td><b>${t}</b></td><td class="num"><b>${CHF(v)}</b></td></tr>`;
+
+function viewErfolg(){
+  const a=abschluss();
+  const zeit=period==='all'?'Gesamter Zeitraum':(periodMonths().length?monthName(periodMonths()[0])+' – '+monthName(a.bis):'—');
+  return `
+  <div class="phead">
+    <div><h1>Erfolgsrechnung</h1><p>Kontenrahmen KMU · ${esc(zeit)}</p></div>
+    <div class="field"><select id="period">${periodOpts()}</select></div>
+  </div>
+  ${a.ohneEingang.length?`<div class="banner warn"><span><b>${a.ohneEingang.length} verkaufte${a.ohneEingang.length===1?'r Artikel hat':' Artikel haben'} keinen Wareneingang</b>
+    (${esc(a.ohneEingang.slice(0,6).join(', '))}${a.ohneEingang.length>6?' …':''}) – ${a.ohneEingang.length===1?'er kostet':'sie kosten'} rechnerisch nichts und
+    ${a.ohneEingang.length===1?'erhöht':'erhöhen'} den Bruttogewinn zu Unrecht.</span></div>`:''}
+  <div class="kpis kpis-4">
+    <div class="kpi"><span class="lbl">Nettoerlös</span><span class="v">${CHF(a.nettoerloes)}</span>
+      <span class="sub">nach Gebühren und Porto</span></div>
+    <div class="kpi"><span class="lbl">Bruttogewinn</span><span class="v">${CHF(a.bruttogewinn)}</span>
+      <span class="sub">${a.nettoerloes?(a.bruttogewinn/a.nettoerloes*100).toFixed(1)+' % vom Nettoerlös':'—'}</span></div>
+    <div class="kpi"><span class="lbl">Betriebsergebnis</span><span class="v ${a.betriebsergebnis<0?'neg':'pos'}">${CHF(a.betriebsergebnis)}</span>
+      <span class="sub">vor Warenreserve</span></div>
+    <div class="kpi"><span class="lbl">Steuerbares Ergebnis</span><span class="v ${a.ergebnisSteuer<0?'neg':'pos'}">${CHF(a.ergebnisSteuer)}</span>
+      <span class="sub">nach Warendrittel</span></div>
+  </div>
+  <div class="tbl-wrap"><table>
+    <thead><tr><th style="width:72px">Konto</th><th>Bezeichnung</th><th class="n">Betrag</th></tr></thead>
+    <tbody>
+      ${kRow('3200','Handelserlöse',a.erloes)}
+      ${a.versandKd?kRow('3200','Versandbeiträge der Käufer',a.versandKd):''}
+      ${a.gebuehren?kRow('3800','Erlösminderungen – Verkaufsgebühren',-a.gebuehren):''}
+      ${a.porto?kRow('3800','Erlösminderungen – Porto und Verpackung',-a.porto):''}
+      ${kSum('Nettoerlös aus Lieferungen und Leistungen',a.nettoerloes)}
+      ${kRow('4200','Handelswarenaufwand (Einstandspreis der verkauften Ware)',-a.wareneinsatz)}
+      ${kSum('Bruttogewinn',a.bruttogewinn)}
+      ${a.katListe.length?a.katListe.map(([c,v])=>kRow(kontoFor(c),'Betriebsaufwand – '+esc(c),-v)).join('')
+        :`<tr><td></td><td class="count">keine laufenden Kosten im Zeitraum</td><td></td></tr>`}
+      ${kSum('Betriebsergebnis',a.betriebsergebnis)}
+      ${kRow('1209',(a.reserveDelta>=0?'Bildung':'Auflösung')+' Warenreserve (Warendrittel)',-a.reserveDelta)}
+      ${kSum('Ergebnis nach Warenreserve (steuerlich massgebend)',a.ergebnisSteuer)}
+    </tbody></table></div>
+  <p class="chart-hint"><b>Warenaufwand</b> ist nicht der Einkauf des Zeitraums, sondern was die verkaufte Ware
+    gekostet hat – gerechnet mit dem durchschnittlichen Einstandspreis je SKU. Nur so stimmt der Bruttogewinn.
+    <b>Offene Preorders</b> erscheinen hier nicht als Aufwand: bezahlte, aber nicht gelieferte Ware ist eine
+    Anzahlung und steht in der Bilanz. Die Kontonummern sind ein Vorschlag nach Kontenrahmen KMU; deine
+    Treuhandstelle gruppiert sie allenfalls anders.</p>`;
+}
+
+function viewBilanz(){
+  const a=abschluss();
+  const stichtag=periodMonths().length?monthName(a.bis):'—';
+  return `
+  <div class="phead">
+    <div><h1>Bilanz</h1><p>Kontenrahmen KMU · Stichtag Ende ${esc(stichtag)}</p></div>
+    <div class="field"><select id="period">${periodOpts()}</select></div>
+  </div>
+  ${a.diff?`<div class="banner warn"><span><b>Bilanz geht nicht auf (${CHF(a.diff)}).</b>
+    Von mindestens einem Artikel wurde mehr verkauft als je eingekauft – dann fehlt ein Wareneingang.</span></div>`:''}
+  ${a.ohneEingang.length?`<div class="banner warn"><span><b>Ohne Wareneingang verkauft:</b>
+    ${esc(a.ohneEingang.slice(0,8).join(', '))}${a.ohneEingang.length>8?' …':''}. Diese Ware steht mit Kosten null
+    in den Büchern.</span></div>`:''}
+  <div class="kpis kpis-3">
+    <div class="kpi"><span class="lbl">Warenbestand</span><span class="v">${CHF(a.bestandEnde)}</span>
+      <span class="sub">zu Einstandspreisen</span></div>
+    <div class="kpi"><span class="lbl">Warenreserve</span><span class="v">${CHF(a.reserveEnde)}</span>
+      <span class="sub">ein Drittel, steuerlich zulässig</span></div>
+    <div class="kpi"><span class="lbl">Bilanzsumme</span><span class="v">${CHF(a.aktiven)}</span>
+      <span class="sub">nach Warenreserve</span></div>
+  </div>
+  <div class="card-row even">
+    <div class="card"><h2>Aktiven</h2>
+      <div class="tbl-wrap"><table>
+        <thead><tr><th style="width:72px">Konto</th><th>Bezeichnung</th><th class="n">Betrag</th></tr></thead>
+        <tbody>
+          ${kRow('1020','Flüssige Mittel (rechnerisch)',a.fluessig)}
+          ${a.anzahlungen?kRow('1140','Anzahlungen an Lieferanten (offene Preorders)',a.anzahlungen):''}
+          ${kRow('1200','Handelswaren zu Einstandspreisen',a.bestandEnde)}
+          ${a.reserveEnde?kRow('1209','./. Warenreserve (Warendrittel)',-a.reserveEnde):''}
+          ${kSum('Total Aktiven',a.aktiven)}
+        </tbody></table></div></div>
+    <div class="card"><h2>Passiven</h2>
+      <div class="tbl-wrap"><table>
+        <thead><tr><th style="width:72px">Konto</th><th>Bezeichnung</th><th class="n">Betrag</th></tr></thead>
+        <tbody>
+          ${kRow('2800','Eigenkapital – kumuliertes Ergebnis',a.gewinnAll)}
+          ${a.reserveEnde?kRow('2800','./. stille Reserve auf dem Warenbestand',-a.reserveEnde):''}
+          ${kSum('Total Passiven',a.passiven)}
+        </tbody></table></div>
+      <p class="chart-hint" style="margin-top:10px">Ohne Anfangskapital und ohne Privatbezüge: das Eigenkapital
+        ist alles, was seit dem ersten Eintrag erwirtschaftet wurde.</p></div>
+  </div>
+  <p class="chart-hint"><b>Flüssige Mittel sind gerechnet, nicht gemessen:</b> Einnahmen minus Wareneinkäufe,
+    laufende Kosten und Anzahlungen. Die App kennt dein Bankkonto nicht. Stimmt der Betrag nicht mit deinem
+    Konto überein, fehlt eine Buchung – oder es gab Privatbezüge, die hier niemand sieht. Debitoren, Kreditoren
+    und Abgrenzungen gibt es in diesem Buchhaltungsmodell nicht; alles gilt als sofort bezahlt.</p>`;
 }
 
 /* ---------- Suche über alle Quellen ---------- */
