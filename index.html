@@ -1724,36 +1724,51 @@ function zuRechnen(){
     const tr=frei.filter(r=>!benutzt.has(r.id)&&zuNrAus(r.bem)===v.artikel);
     if(tr.length){ zu[i]=tr.map(r=>r.id); tr.forEach(r=>benutzt.add(r.id)); rang[i]='sicher'; }
   });
-  // 3. Mehrere Verkäufe an denselben Käufer, zusammen auf einer Zeile verbucht.
-  //    Erkannt wird das nur, wenn der Käufer passt und die Summe aufgeht.
-  const offen=V.map((v,i)=>i).filter(i=>!rang[i]&&zuNorm(V[i].kaeufer));
-  const proKunde=new Map();
-  for(const i of offen){ const k=zuNorm(V[i].kaeufer);
-    if(!proKunde.has(k)) proKunde.set(k,[]); proKunde.get(k).push(i); }
-  for(const [,idx] of proKunde){
-    if(idx.length<2) continue;
-    idx.sort((a,b)=>(V[a].d||'').localeCompare(V[b].d||''));
-    for(let a=0;a<idx.length;a++){
-      if(rang[idx[a]]) continue;
-      const gruppe=[idx[a]];
-      for(let b=a+1;b<idx.length;b++)
-        if(!rang[idx[b]]&&zuTage(V[idx[a]].d,V[idx[b]].d)<=4) gruppe.push(idx[b]);
-      if(gruppe.length<2) continue;
-      const summe=+gruppe.reduce((s,i)=>s+V[i].preis,0).toFixed(2);
-      const mitV=+gruppe.reduce((s,i)=>s+V[i].preis+num(V[i].versand),0).toFixed(2);
-      const kand2=nahe(V[gruppe[0]].d,4).filter(r=>!benutzt.has(r.id)&&
-        (Math.abs(num(r.price)-summe)<0.005||Math.abs(num(r.price)-mitV)<0.005||
-         Math.abs(num(r.price)+num(r.cust)-mitV)<0.005));
-      // Ein anderer Name in der Zeile schliesst sie aus, auch wenn die Summe
-      // zufaellig aufgeht. Ein leeres Feld Kaeufer steht dem nicht entgegen.
-      const moeglich=kand2.filter(r=>zuNameGleich(r.person,V[gruppe[0]].kaeufer)>=0.6||!zuNorm(r.person));
-      const mitName=moeglich.filter(r=>zuNameGleich(r.person,V[gruppe[0]].kaeufer)>=0.6);
-      const wahl=(mitName.length===1?mitName:(moeglich.length===1?moeglich:[]));
-      if(wahl.length===1){
-        benutzt.add(wahl[0].id);
-        for(const i of gruppe){ zu[i]=[wahl[0].id]; rang[i]='sammel'; }
+  // 3. Mehrere Verkäufe auf einer Zeile. Wer mehreres auf einmal kauft – zehn
+  //    Einzelkarten etwa – steht im Buch oft als ein Eintrag, schon wegen des
+  //    Portos. Gesucht wird darum von der Zeile aus: welche noch offenen
+  //    Verkäufe desselben Käufers ergeben zusammen genau ihren Betrag? Zuerst
+  //    wird die ganze Gruppe probiert, dann Teilmengen; mehrdeutig heisst, es
+  //    bleibt liegen. Ohne passenden Namen wird gar nichts zusammengefasst.
+  const verkProTag=new Map();
+  V.forEach((v,i)=>{ if(!v.d) return; if(!verkProTag.has(v.d)) verkProTag.set(v.d,[]); verkProTag.get(v.d).push(i); });
+  const verkNahe=(d,tage)=>{
+    const out=[]; const t0=new Date(d+'T12:00:00');
+    for(let k=-tage;k<=tage;k++){
+      const t=new Date(t0); t.setDate(t.getDate()+k);
+      const l=verkProTag.get(t.toISOString().slice(0,10)); if(l) out.push(...l);
+    }
+    return out;
+  };
+  for(const r of frei){
+    if(benutzt.has(r.id)||!zuNorm(r.person)||!r.d) continue;
+    const kandV=verkNahe(r.d,4).filter(i=>!rang[i]&&zuNorm(V[i].kaeufer)
+      &&zuNameGleich(r.person,V[i].kaeufer)>=0.6);
+    if(kandV.length<2||kandV.length>14) continue;
+    const ziel=+num(r.price).toFixed(2), zielMitV=+(num(r.price)+num(r.cust)).toFixed(2);
+    const passt=(sp,sv)=>Math.abs(sp-ziel)<0.02||Math.abs(sv-zielMitV)<0.02||Math.abs(sv-ziel)<0.02;
+    const rechne=idx=>[+idx.reduce((s,i)=>s+V[i].preis,0).toFixed(2),
+                       +idx.reduce((s,i)=>s+V[i].preis+num(V[i].versand),0).toFixed(2)];
+    let wahl=null;
+    const ganz=rechne(kandV);
+    if(passt(ganz[0],ganz[1])) wahl=kandV;
+    else{
+      // Teilmengen durchgehen. Gleich grosse Treffer sind nicht unterscheidbar,
+      // und die Stückzahl der Zeile gibt den Ausschlag, wenn sie passt.
+      const n=kandV.length, treffer=[];
+      for(let m=1;m<(1<<n)&&treffer.length<9;m++){
+        const g=[]; for(let bit=0;bit<n;bit++) if(m&(1<<bit)) g.push(kandV[bit]);
+        if(g.length<2) continue;
+        const [sp,sv]=rechne(g);
+        if(passt(sp,sv)) treffer.push(g);
+      }
+      if(treffer.length===1) wahl=treffer[0];
+      else if(treffer.length>1&&num(r.qty)>1){
+        const pass2=treffer.filter(g=>g.length===num(r.qty));
+        if(pass2.length===1) wahl=pass2[0];
       }
     }
+    if(wahl){ benutzt.add(r.id); for(const i of wahl){ zu[i]=[r.id]; rang[i]='sammel'; } }
   }
   // 4. Der Rest über Datum, Preis, Käufer und die gelernte SKU zum Titel.
   V.forEach((v,i)=>{
