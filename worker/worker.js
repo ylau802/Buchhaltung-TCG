@@ -76,7 +76,13 @@ const FULL_EVERY = 50 * 60 * 1000;   // voller Durchlauf hoechstens stuendlich
 const WINDOW = { cscart: 1, sumup: 2, shopware: 1, prestashop: 2, jsonld: 1 };
 const COOL_AFTER_BLOCK = 30 * 60 * 1000;  // nach der ersten Sperre; danach jeweils doppelt
 const COOL_MAX = 6 * 60 * 60 * 1000;      // laenger als sechs Stunden warten wir nie
-const HOST_PAGES = 4;                // so viele Seiten je Shop und Lauf, mehr nicht
+// So viele Abrufe bekommt ein Shop je Lauf. Wer eine Schnittstelle anbietet,
+// antwortet klein und schnell und vertraegt mehr; wer ganze Seiten ausliefert,
+// bekommt weiterhin vier. Das entscheidet, wie lange eine Runde ueber alle
+// Quellen braucht: bei dreizehn Shopify-Kollektionen desselben Ladens waren es
+// vorher vier Laeufe, also zwanzig Minuten allein fuer diesen einen Shop.
+const HOST_PAGES = { shopify: 12, woocommerce: 8, epages: 6, softridge: 6, wog: 4, manor: 4, jsonld: 4 };
+const HOST_PAGES_DEFAULT = 4;        // HTML-Shops: Shopware, PrestaShop, Wix, SumUp …
 const HOST_PAUSE = 2000;             // Pause zwischen zwei Anfragen an denselben Shop
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // Shops, bei denen es auf Minuten ankommt: die werden jede Minute geprueft,
@@ -2060,7 +2066,7 @@ async function runWatch(env, only, opts) {
     const pg = h.pages || 1, by = h.bytes || 300000;
     const host = new URL(s.url).hostname;
     const used = perHost.get(host) || 0;
-    if (used && used + pg > HOST_PAGES) continue;
+    if (used && used + pg > (HOST_PAGES[s.type] || HOST_PAGES_DEFAULT)) continue;
     if (batch.length && (pg > pagesLeft || by > bytesLeft)) continue;
     batch.push(s); pagesLeft -= pg; bytesLeft -= by; perHost.set(host, used + pg);
   }
