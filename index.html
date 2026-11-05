@@ -1326,8 +1326,9 @@ function viewLager(){
 // Inseratstitel, nicht deine SKU – die Zuordnung lernt die App und merkt sie sich.
 // Zwei Eigenheiten des Exports: ItemQuantity ist immer 1 (die echte Stückzahl
 // steht vorne im Titel, "8x Booster"), und Gebühren fehlen ganz.
-// Artikel- und Auktionsnummer bekommen ihre eigenen Spalten; in der Bemerkung
-// steht nur der Inseratstitel.
+// Artikel- und Auktionsnummer bekommen ihre eigenen Spalten. Die Bemerkung
+// bleibt leer – sie gehoert deinen eigenen Notizen (gebuehrenfrei,
+// Sammelversand), und was verkauft wurde, sagen SKU und Nummer schon.
 const RICARDO_FEE=0.10;
 const rcSplitLine=l=>l.split(';');
 function rcParse(text){
@@ -1428,8 +1429,7 @@ function rcBuchungen(z,feePct){
     hin.push({id:uid(),d:z.d,sku:t.sku,cat:vor.cat||'',form:vor.form||'',set:vor.set||'',
       qty:t.menge,price:preis,cust:vers,fees:geb,porto:0,
       net:r2(preis+vers-geb),shop:'ricardo.ch',person:z.kaeufer,
-      artikel:z.artikel||'',auktion:z.bestellung||'',
-      bem:z.titel});
+      artikel:z.artikel||'',auktion:z.bestellung||'',bem:''});
   });
   return hin;
 }
