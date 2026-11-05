@@ -1578,14 +1578,47 @@ async function rcUebernehmen(){
 /* ---------- Verkäufe den bestehenden Ausgängen zuordnen ---------- */
 // Damit Gebühren und Verkäufe eindeutig zusammenfinden, braucht jede Zeile im
 // Warenausgang die Artikel- und die Auktionsnummer von Ricardo. Diese Ansicht
-// liest die Verkaufsberichte (oder Rechnungen), schlägt zu jedem Verkauf die
-// passende Zeile vor und trägt die Nummern nach. Vorgeschlagen wird nur, was
-// sich begründen lässt – der Rest kommt in die Liste zum Durchgehen.
+// liest die Verkaufsberichte, schlägt zu jedem Verkauf die passende Zeile vor
+// und trägt die Nummern nach. Vorgeschlagen wird nur, was sich begründen lässt
+// – der Rest kommt in die Liste zum Durchgehen.
+// Eine Zeile darf mehrere Nummern tragen: wer drei Sachen auf einmal gekauft
+// hat und als ein Verkauf verbucht wurde, bekommt alle drei Nummern.
 const zuState={verk:[],dateien:[],zu:{},rang:{},kand:{},filter:'pruefen',zeig:60};
 const zuNrAus=t=>{ const m=/ricardo[^0-9]{0,3}(\d{7,})/i.exec(t||''); return m?m[1]:''; };
 const zuTage=(a,b)=>{ if(!a||!b) return 99;
   return Math.round(Math.abs(new Date(a+'T12:00:00')-new Date(b+'T12:00:00'))/86400000); };
-
+const zuListe=t=>String(t||'').split(/[,;\s]+/).map(x=>x.trim()).filter(Boolean);
+// Namen vergleichen, ohne auf Schreibweise zu bestehen.
+const zuNorm=s=>String(s==null?'':s).toLowerCase().normalize('NFD')
+  .replace(/[̀-ͯ]/g,'').replace(/[^a-z0-9]/g,'');
+function zuDist(a,b,max){
+  if(a===b) return 0;
+  if(Math.abs(a.length-b.length)>max) return max+1;
+  let vor=[...Array(b.length+1).keys()];
+  for(let i=1;i<=a.length;i++){
+    const jetzt=[i]; let klein=i;
+    for(let j=1;j<=b.length;j++){
+      const w=Math.min(jetzt[j-1]+1, vor[j]+1, vor[j-1]+(a[i-1]===b[j-1]?0:1));
+      jetzt[j]=w; if(w<klein) klein=w;
+    }
+    if(klein>max) return max+1;
+    vor=jetzt;
+  }
+  return vor[b.length];
+}
+// 1 = gleich, 0 = nichts gemeinsam. Tippfehler und Gross-/Kleinschreibung
+// fallen nicht ins Gewicht.
+function zuNameGleich(a,b){
+  const x=zuNorm(a), y=zuNorm(b);
+  if(!x||!y) return 0;
+  if(x===y) return 1;
+  if(x.length<3||y.length<3) return 0;
+  if(x.includes(y)||y.includes(x)) return 0.9;
+  const max=Math.max(2,Math.floor(Math.max(x.length,y.length)*0.25));
+  const d=zuDist(x,y,max);
+  if(d>max) return 0;
+  return 1-d/Math.max(x.length,y.length);
+}
 function zuAdd(liste,name){
   let n=0;
   for(const v of liste){
@@ -1605,9 +1638,9 @@ function zuSollSku(titel){
   return out;
 }
 // Kandidatenzeilen mit Punkten. Je mehr zusammenpasst, desto höher.
-function zuKand(v,frei,soll){
+function zuKand(v,nahe,soll){
   const out=[];
-  for(const r of frei){
+  for(const r of nahe){
     let s=0; const warum=[];
     if(zuNrAus(r.bem)===v.artikel){ s+=100; warum.push('Nummer in der Bemerkung'); }
     const dd=zuTage(r.d,v.d);
@@ -1620,8 +1653,18 @@ function zuKand(v,frei,soll){
     if(Math.abs(p-v.preis)<0.005){ s+=45; warum.push('gleicher Preis'); }
     else if(Math.abs(p-ges)<0.005){ s+=38; warum.push('Preis inkl. Versand'); }
     else if(v.preis&&p>0&&p<v.preis){ s+=8; warum.push('Teilbetrag'); }
+    else if(v.preis&&p>v.preis){ s+=6; warum.push('Sammelbetrag'); }
     if(soll.length&&soll.includes(r.sku)){ s+=35; warum.push('SKU passt zum Titel'); }
-    if(s>0) out.push({id:r.id,s,warum,sku:r.sku||r.set||'—',d:r.d,price:num(r.price)});
+    const kg=zuNameGleich(r.person,v.kaeufer);
+    if(kg>=0.999){ s+=45; warum.push('gleicher Käufer'); }
+    else if(kg>=0.8){ s+=32; warum.push('Käufer fast gleich'); }
+    else if(kg>=0.6){ s+=14; warum.push('Käufer ähnlich'); }
+    else if(kg===0&&zuNorm(r.person)&&zuNorm(v.kaeufer)){
+      // Steht ein anderer Name drin, bleibt die Zeile zwar waehlbar, kommt aber
+      // nie von selbst durch: die Schwelle fuer "sicher" liegt hoeher.
+      s=Math.min(s,80)-10; warum.push('anderer Käufer');
+    }
+    if(s>0) out.push({id:r.id,s,warum,sku:r.sku||r.set||'—',d:r.d,price:num(r.price),person:r.person||''});
   }
   out.sort((a,b)=>b.s-a.s||zuTage(a.d,v.d)-zuTage(b.d,v.d));
   return out.slice(0,12);
@@ -1631,7 +1674,10 @@ function zuKand(v,frei,soll){
 // Verkaufspreis ergeben, ist das die Aufteilung – sonst wird nichts geraten.
 function zuBundle(v,kand){
   const ziel=+(v.preis).toFixed(2), zielMitV=+(v.preis+num(v.versand)).toFixed(2);
-  const teile=kand.filter(c=>zuTage(c.d,v.d)<=1&&c.price>0&&c.price<ziel-0.004).slice(0,8);
+  // Zeilen mit einem anderen Kaeufer gehoeren nicht zu diesem Verkauf, auch
+  // wenn ihre Preise zufaellig aufgehen.
+  const teile=kand.filter(c=>zuTage(c.d,v.d)<=1&&c.price>0&&c.price<ziel-0.004
+    &&(!zuNorm(c.person)||!zuNorm(v.kaeufer)||zuNameGleich(c.person,v.kaeufer)>=0.6)).slice(0,8);
   if(teile.length<2) return null;
   const treffer=[];
   const suche=(ab,gewaehlt,summe)=>{
@@ -1648,30 +1694,72 @@ function zuBundle(v,kand){
 }
 function zuRechnen(){
   const alle=rows('warenausgang');
-  const belegt=new Map(); const frei=[];
+  const belegt=new Map(); const frei=[]; const perTag=new Map();
   for(const r of alle){
-    const nr=String(r.artikel||'').trim();
-    if(nr){ if(!belegt.has(nr))belegt.set(nr,[]); belegt.get(nr).push(r); continue; }
+    const nrn=zuListe(r.artikel);
+    if(nrn.length){ for(const nr of nrn){ if(!belegt.has(nr))belegt.set(nr,[]); belegt.get(nr).push(r); } }
     const shop=(r.shop||'').trim();
     if(shop&&!/ricardo/i.test(shop)) continue;      // anderer Laden bleibt aussen vor
+    if(!r.d) continue;
     frei.push(r);
+    if(!perTag.has(r.d)) perTag.set(r.d,[]);
+    perTag.get(r.d).push(r);
   }
+  // Zeilen in der Nähe eines Datums – spart den Durchlauf über alles.
+  const nahe=(d,tage)=>{
+    const out=[]; const t0=new Date(d+'T12:00:00');
+    for(let k=-tage;k<=tage;k++){
+      const t=new Date(t0); t.setDate(t.getDate()+k);
+      const l=perTag.get(t.toISOString().slice(0,10)); if(l) out.push(...l);
+    }
+    return out;
+  };
   const zu={}, rang={}, kand={}, benutzt=new Set();
-  // 1. Was schon eine Nummer trägt, ist fertig.
-  zuState.verk.forEach((v,i)=>{
-    if(belegt.has(v.artikel)){ zu[i]=belegt.get(v.artikel).map(r=>r.id); rang[i]='fertig'; }
-  });
+  const V=zuState.verk;
+  // 1. Was die Nummer schon trägt, ist fertig.
+  V.forEach((v,i)=>{ if(belegt.has(v.artikel)){ zu[i]=belegt.get(v.artikel).map(r=>r.id); rang[i]='fertig'; } });
   // 2. Die Nummer steht in der Bemerkung – das ist eindeutig.
-  zuState.verk.forEach((v,i)=>{
+  V.forEach((v,i)=>{
     if(rang[i]) return;
     const tr=frei.filter(r=>!benutzt.has(r.id)&&zuNrAus(r.bem)===v.artikel);
     if(tr.length){ zu[i]=tr.map(r=>r.id); tr.forEach(r=>benutzt.add(r.id)); rang[i]='sicher'; }
   });
-  // 3. Der Rest über Datum, Preis und die gelernte SKU zum Titel.
-  zuState.verk.forEach((v,i)=>{
+  // 3. Mehrere Verkäufe an denselben Käufer, zusammen auf einer Zeile verbucht.
+  //    Erkannt wird das nur, wenn der Käufer passt und die Summe aufgeht.
+  const offen=V.map((v,i)=>i).filter(i=>!rang[i]&&zuNorm(V[i].kaeufer));
+  const proKunde=new Map();
+  for(const i of offen){ const k=zuNorm(V[i].kaeufer);
+    if(!proKunde.has(k)) proKunde.set(k,[]); proKunde.get(k).push(i); }
+  for(const [,idx] of proKunde){
+    if(idx.length<2) continue;
+    idx.sort((a,b)=>(V[a].d||'').localeCompare(V[b].d||''));
+    for(let a=0;a<idx.length;a++){
+      if(rang[idx[a]]) continue;
+      const gruppe=[idx[a]];
+      for(let b=a+1;b<idx.length;b++)
+        if(!rang[idx[b]]&&zuTage(V[idx[a]].d,V[idx[b]].d)<=4) gruppe.push(idx[b]);
+      if(gruppe.length<2) continue;
+      const summe=+gruppe.reduce((s,i)=>s+V[i].preis,0).toFixed(2);
+      const mitV=+gruppe.reduce((s,i)=>s+V[i].preis+num(V[i].versand),0).toFixed(2);
+      const kand2=nahe(V[gruppe[0]].d,4).filter(r=>!benutzt.has(r.id)&&
+        (Math.abs(num(r.price)-summe)<0.005||Math.abs(num(r.price)-mitV)<0.005||
+         Math.abs(num(r.price)+num(r.cust)-mitV)<0.005));
+      // Ein anderer Name in der Zeile schliesst sie aus, auch wenn die Summe
+      // zufaellig aufgeht. Ein leeres Feld Kaeufer steht dem nicht entgegen.
+      const moeglich=kand2.filter(r=>zuNameGleich(r.person,V[gruppe[0]].kaeufer)>=0.6||!zuNorm(r.person));
+      const mitName=moeglich.filter(r=>zuNameGleich(r.person,V[gruppe[0]].kaeufer)>=0.6);
+      const wahl=(mitName.length===1?mitName:(moeglich.length===1?moeglich:[]));
+      if(wahl.length===1){
+        benutzt.add(wahl[0].id);
+        for(const i of gruppe){ zu[i]=[wahl[0].id]; rang[i]='sammel'; }
+      }
+    }
+  }
+  // 4. Der Rest über Datum, Preis, Käufer und die gelernte SKU zum Titel.
+  V.forEach((v,i)=>{
     if(rang[i]) return;
     const soll=zuSollSku(v.titel);
-    const k=zuKand(v,frei.filter(r=>!benutzt.has(r.id)),soll);
+    const k=zuKand(v,nahe(v.d,14).filter(r=>!benutzt.has(r.id)),soll);
     kand[i]=k;
     if(!k.length){ rang[i]='offen'; return; }
     if(k[0].s>=95&&(!k[1]||k[0].s-k[1].s>=25)){ zu[i]=[k[0].id]; benutzt.add(k[0].id); rang[i]='sicher'; return; }
@@ -1686,14 +1774,15 @@ function zuRechnen(){
     }
     rang[i]='pruefen';
   });
-  // Kandidaten auch den sicheren Zeilen mitgeben, damit man sie ändern kann.
-  zuState.verk.forEach((v,i)=>{
+  // Kandidaten auch den schon entschiedenen Zeilen mitgeben, damit man sie
+  // ändern kann.
+  V.forEach((v,i)=>{
     if(kand[i]||rang[i]==='fertig') return;
-    kand[i]=zuKand(v,frei,zuSollSku(v.titel));
+    kand[i]=zuKand(v,nahe(v.d,14),zuSollSku(v.titel));
   });
   zuState.zu=zu; zuState.rang=rang; zuState.kand=kand;
 }
-const ZURANG={fertig:'schon zugeordnet',sicher:'sicher',pruefen:'zu prüfen',offen:'kein Vorschlag'};
+const ZURANG={fertig:'schon zugeordnet',sicher:'sicher',sammel:'Sammelkauf',pruefen:'zu prüfen',offen:'kein Vorschlag'};
 function viewRcZuord(){
   const Z=zuState;
   if(!Z.verk.length) return `
@@ -1705,55 +1794,61 @@ function viewRcZuord(){
       herunterladen), einen pro Monat. Darin steht zu jedem Verkauf die Artikel- und die
       Auktionsnummer. Du kannst alle Monate zusammen auswählen; die App schlägt dir dann zu jedem
       Verkauf die passende Zeile vor, und was nicht eindeutig ist, gehst du selbst durch.
-      Die Rechnungen als PDF gehören nicht hierher, die braucht der Gebühren-Abgleich.
-      Die Dateien bleiben auf dem Gerät.</div>
+      Verglichen werden Datum, Preis, der Käufer-Nickname und die SKU, die der Import zum
+      Inseratstitel schon gelernt hat. Die Rechnungen als PDF gehören nicht hierher, die braucht
+      der Gebühren-Abgleich. Die Dateien bleiben auf dem Gerät.</div>
     <div class="toolbar" style="margin-top:10px"><button class="btn" id="zuPick">Berichte auswählen…</button></div>
   </div>`;
-  const n={fertig:0,sicher:0,pruefen:0,offen:0};
+  const n={fertig:0,sicher:0,sammel:0,pruefen:0,offen:0};
   Z.verk.forEach((v,i)=>n[Z.rang[i]||'offen']++);
   const liste=Z.verk.map((v,i)=>i).filter(i=>Z.filter==='alle'||Z.rang[i]===Z.filter);
   const zeig=liste.slice(0,Z.zeig);
-  const opt=(i,id)=>{
-    const k=Z.kand[i]||[];
-    const drin=(Z.zu[i]||[]);
+  const opt=i=>{
+    const k=Z.kand[i]||[], drin=(Z.zu[i]||[]);
     return `<option value="">— keine —</option>`+k.map(c=>
-      `<option value="${c.id}" ${drin.includes(c.id)?'selected':''}>${esc(c.sku)} · ${DDE(c.d)} · ${CHF(c.price)}${c.warum.length?' · '+esc(c.warum[0]):''}</option>`).join('');
+      `<option value="${c.id}" ${drin.includes(c.id)?'selected':''}>${esc(c.sku)} · ${DDE(c.d)} · ${CHF(c.price)}${c.person?' · '+esc(c.person):''}${c.warum.length?' · '+esc(c.warum[0]):''}</option>`).join('');
   };
   const zeile=i=>{
     const v=Z.verk[i], ids=Z.zu[i]||[], r=Z.rang[i]||'offen';
-    const zeilen=ids.map(id=>rows('warenausgang').find(x=>x.id===id)).filter(Boolean);
-    const summe=zeilen.reduce((s,x)=>s+num(x.price),0);
-    const passt=Math.abs(summe-v.preis)<0.005||Math.abs(summe-(v.preis+num(v.versand)))<0.005;
+    const alle=rows('warenausgang');
+    const zeilen=ids.map(id=>alle.find(x=>x.id===id)).filter(Boolean);
+    // Bei einem Sammelkauf teilen sich mehrere Verkäufe eine Zeile – dann wird
+    // gegen die Summe aller dieser Verkäufe geprüft, nicht gegen den einen.
+    const mit=Object.keys(Z.zu).filter(k=>+k!==i&&(Z.zu[k]||[]).some(x=>ids.includes(x))).map(Number);
+    const vSum=+[i,...mit].reduce((s,k)=>s+Z.verk[k].preis,0).toFixed(2);
+    const summe=+zeilen.reduce((s,x)=>s+num(x.price),0).toFixed(2);
+    const passt=Math.abs(summe-vSum)<0.02||Math.abs(summe-(vSum+num(v.versand)))<0.02;
     return `<div class="rc-zeile ${r==='offen'?'rc-offen':''}" data-zi="${i}">
       <div class="rc-kopf"><span class="mono count">${DDE(v.d)}</span><b>${esc(v.titel||'—')}</b>
-        <span class="count">${CHF(v.preis)}${v.versand?' + '+CHF(v.versand):''} · Artikel ${esc(v.artikel)}${v.bestellung?' · Auktion '+esc(v.bestellung):''}</span>
-        <span class="count" style="margin-left:auto">${ZURANG[r]}</span></div>
-      ${zeilen.map(x=>`<div class="rc-teil"><span class="count">${esc(x.sku||x.set||'—')} · ${DDE(x.d)} · ${CHF(num(x.price))}</span>
+        <span class="count">${CHF(v.preis)}${v.versand?' + '+CHF(v.versand):''}${v.kaeufer?' · '+esc(v.kaeufer):''} · Artikel ${esc(v.artikel)}</span>
+        <span class="count" style="margin-left:auto">${ZURANG[r]}${mit.length?' · mit '+mit.length+' weiteren':''}</span></div>
+      ${zeilen.map(x=>`<div class="rc-teil"><span class="count">${esc(x.sku||x.set||'—')} · ${DDE(x.d)} · ${CHF(num(x.price))}${x.person?' · '+esc(x.person):''}</span>
         <button class="iconbtn" data-zuweg="${i}" data-id="${x.id}" title="wieder lösen">&times;</button></div>`).join('')}
       ${r==='fertig'?'<div class="cap">Die Nummer steht schon in dieser Zeile.</div>':`
       <div class="rc-teil">
         <select data-zusel="${i}">${opt(i)}</select>
-        ${zeilen.length?`<span class="count ${passt?'pos':'neg'}">Summe ${CHF(summe)}${passt?' stimmt':' ≠ '+CHF(v.preis)}</span>`:''}
+        ${zeilen.length?`<span class="count ${passt?'pos':'neg'}">Zeile ${CHF(summe)} · Verkäufe ${CHF(vSum)}${passt?' – stimmt':' – weicht ab'}</span>`:''}
       </div>`}
     </div>`;
   };
+  const offenZahl=Object.keys(Z.zu).filter(i=>Z.rang[i]!=='fertig'&&(Z.zu[i]||[]).length).length;
   return `
   <div class="phead">
     <div><h1>Verkäufe zuordnen</h1><p>${N0(Z.verk.length)} Verkäufe aus ${Z.dateien.length} ${Z.dateien.length===1?'Bericht':'Berichten'}</p></div>
     <div class="expbar"><button class="btn ghost" id="zuBack">Abbrechen</button>
-      <button class="btn" id="zuGo" ${n.sicher+n.pruefen?'':'disabled'}>${N0(Object.keys(Z.zu).filter(i=>Z.rang[i]!=='fertig'&&(Z.zu[i]||[]).length).length)} übernehmen</button></div></div>
+      <button class="btn" id="zuGo" ${offenZahl?'':'disabled'}>${N0(offenZahl)} übernehmen</button></div></div>
   <div class="kpis kpis-4">
     <div class="kpi"><span class="lbl">Sicher</span><span class="v pos">${N0(n.sicher)}</span>
-      <span class="sub">Nummer oder Datum, Preis und SKU passen</span></div>
+      <span class="sub">Nummer, oder Datum, Preis, Käufer und SKU passen</span></div>
+    <div class="kpi"><span class="lbl">Sammelkäufe</span><span class="v">${N0(n.sammel)}</span>
+      <span class="sub">mehrere Verkäufe auf einer Zeile</span></div>
     <div class="kpi"><span class="lbl">Zu prüfen</span><span class="v">${N0(n.pruefen)}</span>
       <span class="sub">mehrere Zeilen kommen in Frage</span></div>
-    <div class="kpi"><span class="lbl">Kein Vorschlag</span><span class="v ${n.offen?'neg':''}">${N0(n.offen)}</span>
-      <span class="sub">keine passende Zeile gefunden</span></div>
-    <div class="kpi"><span class="lbl">Schon zugeordnet</span><span class="v">${N0(n.fertig)}</span>
-      <span class="sub">Nummer steht bereits drin</span></div>
+    <div class="kpi"><span class="lbl">Ohne Vorschlag</span><span class="v ${n.offen?'neg':''}">${N0(n.offen)}</span>
+      <span class="sub">${N0(n.fertig)} tragen die Nummer schon</span></div>
   </div>
   <div class="toolbar">
-    <select id="zuFilter">${[['pruefen','Nur zu prüfen'],['offen','Nur ohne Vorschlag'],['sicher','Nur sichere'],['fertig','Nur schon zugeordnete'],['alle','Alle Verkäufe']]
+    <select id="zuFilter">${[['pruefen','Nur zu prüfen'],['offen','Nur ohne Vorschlag'],['sammel','Nur Sammelkäufe'],['sicher','Nur sichere'],['fertig','Nur schon zugeordnete'],['alle','Alle Verkäufe']]
       .map(o=>`<option value="${o[0]}" ${Z.filter===o[0]?'selected':''}>${o[1]} (${N0(o[0]==='alle'?Z.verk.length:n[o[0]])})</option>`).join('')}</select>
     <div class="spacer"></div>
     <button class="btn ghost sm" id="zuPick2">Weiterer Bericht…</button>
@@ -1762,9 +1857,11 @@ function viewRcZuord(){
   ${liste.length>zeig.length?`<div class="toolbar" style="margin-top:10px"><button class="btn ghost sm" id="zuMehr">Weitere ${N0(Math.min(60,liste.length-zeig.length))} zeigen (${N0(liste.length-zeig.length)} übrig)</button></div>`:''}
   <p class="chart-hint">Übernommen werden <b>Artikel-Nummer</b> und <b>Auktions-Nummer</b> in die ausgewählten
     Zeilen; ist das Feld Käufer noch leer, kommt der Nickname dazu. Sonst wird nichts verändert – Preise,
-    Mengen und Gebühren bleiben, wie sie sind. Ein Verkauf darf auf mehrere Zeilen zeigen: bei einem
-    aufgeteilten Bundle bekommt jede Teilzeile dieselbe Nummer, und die Summe sollte dann dem
-    Verkaufspreis entsprechen.</p>`;
+    Mengen und Gebühren bleiben, wie sie sind. Eine Zeile darf mehrere Nummern tragen: hast du mehrere
+    Käufe desselben Kunden zusammen verbucht, stehen dort alle Nummern, durch Komma getrennt, und der
+    Gebühren-Abgleich zählt später alle diese Gebühren auf diese Zeile. Umgekehrt darf ein Verkauf auf
+    mehrere Zeilen zeigen – bei einem aufgeteilten Bundle bekommt jede Teilzeile dieselbe Nummer.
+    Der Käufer-Nickname wird mitverglichen, Schreibfehler und Gross-/Kleinschreibung stören dabei nicht.</p>`;
 }
 function wireRcZuord(){
   const Z=zuState;
@@ -1797,10 +1894,10 @@ function wireRcZuord(){
   for(const el of $$('[data-zusel]')) el.onchange=()=>{
     const i=+el.dataset.zusel, id=el.value;
     if(!id) return;
-    // Dieselbe Zeile darf nicht zweimal vergeben sein.
-    for(const k of Object.keys(Z.zu)) if(+k!==i) Z.zu[k]=(Z.zu[k]||[]).filter(x=>x!==id);
+    // Dieselbe Zeile darf bei mehreren Verkäufen stehen (Sammelkauf), darum
+    // wird hier nichts anderswo entfernt.
     Z.zu[i]=[...new Set([...(Z.zu[i]||[]),id])];
-    if(Z.rang[i]!=='fertig') Z.rang[i]='sicher';
+    if(Z.rang[i]!=='fertig'&&Z.rang[i]!=='sammel') Z.rang[i]='sicher';
     draw();
   };
   for(const el of $$('[data-zuweg]')) el.onclick=()=>{
@@ -1813,18 +1910,24 @@ function wireRcZuord(){
 }
 async function zuUebernehmen(){
   const Z=zuState; let n=0, v2=0;
+  const beruehrt=new Set();
   for(const k of Object.keys(Z.zu)){
     const i=+k, v=Z.verk[i];
     if(!v||Z.rang[i]==='fertig') continue;
     let eine=false;
     for(const id of Z.zu[i]||[]){
       const r=store.warenausgang.find(x=>x.id===id); if(!r) continue;
-      r.artikel=v.artikel; r.auktion=v.bestellung||'';
+      // Anhängen statt überschreiben: eine Zeile kann mehrere Käufe tragen.
+      const art=zuListe(r.artikel), auk=zuListe(r.auktion);
+      if(!art.includes(v.artikel)) art.push(v.artikel);
+      if(v.bestellung&&!auk.includes(v.bestellung)) auk.push(v.bestellung);
+      r.artikel=art.join(', '); r.auktion=auk.join(', ');
       if(!String(r.person||'').trim()&&v.kaeufer) r.person=v.kaeufer;
-      n++; eine=true;
+      beruehrt.add(id); eine=true;
     }
     if(eine) v2++;
   }
+  n=beruehrt.size;
   if(!n){ toast('Nichts zum Übernehmen'); return; }
   persist();
   zuRechnen();
@@ -2124,21 +2227,34 @@ function fxPlan(){
   const schluessel=(map,k,r)=>{ if(!map.has(k))map.set(k,[]); map.get(k).push(r); };
   let mitNr=0;
   for(const r of alle){
-    const feld=String(r.artikel||'').trim();
-    const nr=feld||nrVon(r);
-    if(nr){ r._feld=feld?1:0; if(feld)mitNr++; schluessel(perNr,nr,r); continue; }
+    // Eine Zeile darf mehrere Nummern tragen (mehrere Kaeufe zusammen verbucht).
+    const nrn=zuListe(r.artikel);
+    if(nrn.length){ r._feld=1; mitNr++; for(const nr of nrn) schluessel(perNr,nr,r); continue; }
+    const nr=nrVon(r);
+    if(nr){ r._feld=0; schluessel(perNr,nr,r); continue; }
     const shop=(r.shop||'').trim();
     if(shop&&!/ricardo/i.test(shop)) continue;            // anderer Laden: nicht anfassen
     if(!r.d) continue;
     schluessel(preisK,r.d+'|'+num(r.price).toFixed(2),r);
     schluessel(totalK,r.d+'|'+(num(r.price)+num(r.cust)).toFixed(2),r);
   }
-  const benutzt=new Set(), treffer=[];
+  const benutzt=new Set();
+  // Beitraege je Zeile sammeln: eine Zeile kann Gebuehren aus mehreren
+  // Verkaeufen bekommen, und ein Verkauf kann sich auf mehrere Zeilen verteilen.
+  const beitrag=new Map();
+  const dazu=(r,g,aid,wie,titel,teil)=>{
+    let o=beitrag.get(r.id);
+    if(!o){ o={r,geb:0,aids:[],wie,titel,teil:false}; beitrag.set(r.id,o); }
+    o.geb=r2(o.geb+g); o.aids.push(aid);
+    if(wie==='nummer') o.wie='nummer';
+    if(teil) o.teil=true;
+    if(!o.titel) o.titel=titel;
+  };
   let ohneZeile=0, ohneZeileB=0, ohneBericht=0, ohneBerichtB=0, mehrdeutig=0;
   for(const [aid,gSum] of geb){
     const vk=sales.get(aid);
     if(!vk){ ohneBericht++; ohneBerichtB+=gSum; continue; }
-    let ziele=(perNr.get(aid)||[]).filter(r=>!benutzt.has(r.id)), wie='nummer';
+    let ziele=(perNr.get(aid)||[]), wie='nummer';
     if(ziele.length){ ziele.forEach(r=>benutzt.add(r.id)); if(!ziele[0]._feld) wie='bem'; }
     else if(fxState.unsicher){
       for(const v of vk){
@@ -2168,10 +2284,12 @@ function fxPlan(){
       const q=pGes?num(r.price)/pGes:1/ziele.length;
       const g=letzte?r2(restG):r2(gSum*q);
       restG=r2(restG-g);
-      treffer.push({id:r.id,d:r.d,sku:r.sku||r.set||'',bem:r.bem||'',titel:(vk[0]||{}).titel||'',
-        price:num(r.price),geb0:num(r.fees),geb1:g,wie,aid,teil:ziele.length>1,mehrfach:vk.length>1});
+      dazu(r,g,aid,wie,(vk[0]||{}).titel||'',ziele.length>1);
     });
   }
+  const treffer=[...beitrag.values()].map(o=>({id:o.r.id,d:o.r.d,sku:o.r.sku||o.r.set||'',
+    bem:o.r.bem||'',titel:o.titel||'',price:num(o.r.price),geb0:num(o.r.fees),geb1:r2(o.geb),
+    wie:o.wie,aid:o.aids.join(', '),teil:o.teil,sammel:o.aids.length>1}));
   treffer.sort((a,b)=>(b.d||'').localeCompare(a.d||''));
   return {treffer,ohneZeile,ohneZeileB,ohneBericht,ohneBerichtB,mehrdeutig,doppelt,ersetzt,
     nAid:geb.size,mitNr};
@@ -2237,7 +2355,8 @@ function viewRcFees(){
     return `<tr class="${aus?'fx-aus':''}">
       <td class="mono count">${DDE(t.d)}</td>
       <td>${esc(t.sku||'—')}<span class="count"> · ${esc((t.titel||t.bem||'').slice(0,46))}</span>
-        ${t.teil?`<span class="count"> · ${t.mehrfach?'Inserat mehrfach verkauft':'Teil eines Bundles'}</span>`:''}
+        ${t.sammel?`<span class="count"> · ${N0(t.aid.split(',').length)} Verkäufe auf dieser Zeile</span>`:''}
+        ${t.teil?'<span class="count"> · Teil eines Bundles</span>':''}
         ${t.wie!=='nummer'?`<span class="count"> · ${FXWIE[t.wie]}</span>`:''}</td>
       <td class="num">${CHF(t.price)}</td>
       <td class="num count">${t.price?(t.geb1/t.price*100).toFixed(1)+' %':'—'}</td>
