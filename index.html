@@ -156,6 +156,12 @@ main{padding:0;min-width:0}
 tr.sumrow td{border-top:1px solid var(--line);background:var(--surface-2)}
 .expbar{display:flex;gap:6px;align-items:center}
 .skuhint{display:block;margin-top:3px;font-size:11.5px}
+.nr-mehr{display:inline}
+.nr-mehr summary{display:inline;cursor:pointer;color:var(--muted);font-size:12px;
+  border:1px solid var(--line);border-radius:5px;padding:0 4px;margin-left:4px;list-style:none}
+.nr-mehr summary::-webkit-details-marker{display:none}
+.nr-mehr summary::marker{content:''}
+.nr-mehr[open] summary{background:var(--surface-2)}
 .fx-aus{opacity:.42}
 .fx-aus td{text-decoration:line-through}
 .rc-liste{display:flex;flex-direction:column;gap:9px}
@@ -1100,7 +1106,7 @@ const COLS={
     ['d','Datum','d'],['sku','SKU','s'],['cat','Kategorie','s'],
     ['qty','Menge','n'],['price','Verkauf','n'],['cust','Kd-Versand','n'],['fees','Gebühren','n'],
     ['porto','Porto','n'],['net','Netto','n'],['shop','Laden','s'],['person','Käufer','s'],
-    ['artikel','Artikel-Nr.','s'],['auktion','Auktions-Nr.','s'],['bem','Bemerkung','w'] ],
+    ['bem','Bemerkung','w'],['artikel','Artikel-Nr.','nr'],['auktion','Auktions-Nr.','nr'] ],
   laufende_kosten:[
     ['d','Datum','d'],['cat','Kategorie','s'],['desc','Beschreibung','w'],['qty','Menge','n'],
     ['total','Betrag','n'],['shop','Laden','s'],['receipt','Beleg','s'] ],
@@ -1240,6 +1246,15 @@ function rowHTML(L,r,cols){
     if(k==='sku')return `<td ${a} class="mono${e}">${esc(v||'—')}</td>`;
     if(t==='n'){ const nn=num(v);
       return `<td ${a} class="num${nn?'':' e'}">${(k==='qty'||k==='got')?N0(nn):(nn?N2(nn):'—')}</td>`; }
+    if(t==='nr'){
+      // Mehrere Nummern je Zeile gibt es bei Sammelkäufen. Zwei stehen da,
+      // der Rest klappt auf – ohne Javascript, das macht <details> von selbst.
+      const n=String(v||'').split(/[,;\s]+/).filter(Boolean);
+      if(!n.length) return `<td ${a} class="mono e">—</td>`;
+      const vorn=n.slice(0,2).join(', '), rest=n.slice(2);
+      return `<td ${a} class="mono">${esc(vorn)}${rest.length
+        ?`<details class="nr-mehr"><summary>+${rest.length}</summary>${esc(', '+rest.join(', '))}</details>`:''}</td>`;
+    }
     if(t==='w')return `<td ${a} class="cell-wrap${e}">${esc(v||'—')}</td>`;
     return `<td ${a} class="${e.trim()}">${esc(v||'—')}</td>`;
   }).join('')}
@@ -3371,8 +3386,8 @@ const FORMS={
     ['cust','Erhaltene Versandkosten (Kunde)','num'],['fees','Plattform-Gebühren','num'],
     ['porto','Reale Versandkosten (Porto)','num'],['net','Netto-Einnahme','num'],
     ['shop','Laden / Plattform','datalist:shop'],['person','Käufer','text'],
-    ['artikel','Artikel-Nummer (Ricardo)','text'],['auktion','Auktions-Nummer (Ricardo)','text'],
-    ['bem','Bemerkung','text'] ],
+    ['bem','Bemerkung','text'],
+    ['artikel','Artikel-Nummer (Ricardo)','text'],['auktion','Auktions-Nummer (Ricardo)','text'] ],
   laufende_kosten:[
     ['d','Datum','date'],['cat','Kategorie','datalist:kostcat'],['desc','Beschreibung','text'],
     ['qty','Menge','num'],['total','Gesamtpreis','num'],['shop','Laden','datalist:shop'],
