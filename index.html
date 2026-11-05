@@ -1321,6 +1321,26 @@ function viewLager(){
   Warenwert und Rohertrag verwenden diesen Durchschnitt. Bei negativem Bestand stimmen Ein- oder Ausgänge nicht überein.</p>`;
 }
 
+// Dateiauswahl für alle Ricardo-Ansichten. Zwei Eigenheiten sind hier
+// berücksichtigt: das Feld muss im Dokument stehen, sonst öffnet Safari auf
+// dem iPhone den Dialog gar nicht, und die Liste der erlaubten Typen ist
+// absichtlich weit – iOS blendet CSV-Dateien sonst aus, weil es sie je nach
+// Herkunft als reinen Text führt. Was wirklich drinsteht, prüft danach die
+// Ansicht selbst.
+const CSV_TYPEN='.csv,text/csv,text/comma-separated-values,application/csv,text/plain';
+const CSVPDF_TYPEN=CSV_TYPEN+',.pdf,application/pdf';
+function dateiWahl(accept,viele,fertig){
+  const inp=document.createElement('input');
+  inp.type='file'; if(accept) inp.accept=accept; inp.multiple=!!viele;
+  inp.style.cssText='position:fixed;left:-9999px;top:0;width:1px;height:1px;opacity:0';
+  document.body.appendChild(inp);
+  const weg=()=>{ try{ inp.remove(); }catch(e){} };
+  inp.onchange=async()=>{ const fs=[...(inp.files||[])]; try{ await fertig(fs); } finally{ weg(); } };
+  inp.oncancel=weg;
+  setTimeout(()=>{ if(!inp.files||!inp.files.length) weg(); },300000);
+  inp.click();
+}
+
 /* ---------- Verkäufe von ricardo.ch einlesen ---------- */
 // Ricardo gibt einen CSV-Bericht mit Semikolon als Trenner. Darin steht der
 // Inseratstitel, nicht deine SKU – die Zuordnung lernt die App und merkt sie sich.
@@ -1492,18 +1512,14 @@ function viewRcImport(){
 function wireRcImport(){
   const back=$('#rcBack'); if(back)back.onclick=()=>{ rcState.zeilen=null; go('warenausgang'); };
   const fee=$('#rcFee'); if(fee)fee.onchange=()=>{ rcState.fee=num(fee.value)||0; };
-  const pick=$('#rcPick'); if(pick)pick.onclick=()=>{
-    const inp=document.createElement('input'); inp.type='file'; inp.accept='.csv,text/csv';
-    inp.onchange=async()=>{
-      const f=inp.files[0]; if(!f)return;
-      try{
-        const roh=rcParse(await f.text());
-        if(!roh.length){ toast('Keine Verkäufe in der Datei'); return; }
-        rcState.datei=f.name; rcState.zeilen=roh.map(rcZeile); draw();
-      }catch(e){ toast(e.message||'Datei nicht lesbar'); }
-    };
-    inp.click();
-  };
+  const pick=$('#rcPick'); if(pick)pick.onclick=()=>dateiWahl(CSV_TYPEN,false,async fs=>{
+    const f=fs[0]; if(!f){ toast('Keine Datei gewählt'); return; }
+    try{
+      const roh=rcParse(await f.text());
+      if(!roh.length){ toast('Keine Verkäufe in der Datei'); return; }
+      rcState.datei=f.name; rcState.zeilen=roh.map(rcZeile); draw();
+    }catch(e){ toast(e.message||'Datei nicht lesbar'); }
+  });
   // Eingaben übernehmen, ohne die Ansicht neu zu zeichnen – sonst springt der Fokus.
   for(const el of $$('[data-rc]')){
     el.oninput=()=>{
@@ -1753,27 +1769,27 @@ function viewRcZuord(){
 function wireRcZuord(){
   const Z=zuState;
   const b=$('#zuBack'); if(b)b.onclick=()=>{ go('warenausgang'); };
-  const lies=async()=>{
-    const inp=document.createElement('input'); inp.type='file';
-    inp.accept='.csv,text/csv'; inp.multiple=true;
-    inp.onchange=async()=>{
-      let n=0, fehler=[], pdf=0;
-      for(const f of [...inp.files]){
-        if(/\.pdf$/i.test(f.name)||f.type==='application/pdf'){ pdf++; continue; }
-        try{
-          const text=await f.text();
-          if(!/Article ID/i.test(text.split(/\r?\n/)[0]||'')) throw new Error('kein Bericht');
-          n+=zuAdd(rcParse(text),f.name);
-        }catch(e){ fehler.push(f.name); }
-      }
-      if(n) zuRechnen();
-      draw();
-      toast(pdf?'Rechnungen gehören zum Gebühren-Abgleich – hier braucht es die Verkaufsberichte'
-        :(fehler.length?`${fehler.length===1?'Eine Datei':fehler.length+' Dateien'} nicht erkannt`
-        :`${n} Verkäufe gelesen`));
-    };
-    inp.click();
-  };
+  const lies=()=>dateiWahl(CSV_TYPEN,true,async fs=>{
+    let n=0, fehler=0, pdf=0, grund='';
+    if(!fs.length){ toast('Keine Datei gewählt'); return; }
+    for(const f of fs){
+      if(/\.pdf$/i.test(f.name)||f.type==='application/pdf'){ pdf++; continue; }
+      try{
+        const text=await f.text();
+        const kopf=text.replace(/^﻿/,'').split(/\r?\n/)[0]||'';
+        if(/transaction_type/.test(kopf)) throw new Error('Das ist die Transaktionsliste – sie gehört zum Gebühren-Abgleich');
+        if(!/Article ID/i.test(kopf)) throw new Error('Keine Spalte Article ID – das sieht nicht nach einem Verkaufsbericht aus');
+        const neu=zuAdd(rcParse(text),f.name);
+        if(!neu&&!grund) grund='Diese Verkäufe sind schon eingelesen';
+        n+=neu;
+      }catch(e){ fehler++; if(!grund) grund=e.message||'Datei nicht lesbar'; }
+    }
+    if(n) zuRechnen();
+    draw();
+    toast(n?`${n} Verkäufe gelesen`
+      :(pdf?'Rechnungen gehören zum Gebühren-Abgleich – hier braucht es die Verkaufsberichte'
+      :(grund||'Nichts gelesen')));
+  });
   const p1=$('#zuPick'); if(p1)p1.onclick=lies;
   const p2=$('#zuPick2'); if(p2)p2.onclick=lies;
   const fl=$('#zuFilter'); if(fl)fl.onchange=()=>{ Z.filter=fl.value; Z.zeig=60; draw(); };
@@ -2300,36 +2316,31 @@ function viewRcFees(){
 function wireRcFees(){
   const S=fxState;
   const b=$('#fxBack'); if(b)b.onclick=()=>{ S.plan=null; S.aus={}; S.alle=false; go('warenausgang'); };
-  const pick=$('#fxPick'); if(pick)pick.onclick=()=>{
-    const inp=document.createElement('input'); inp.type='file';
-    inp.accept='.csv,.pdf,text/csv,application/pdf'; inp.multiple=true;
-    inp.onchange=async()=>{
-      let nP=0,nT=0,nV=0,fehler=[];
-      for(const f of [...inp.files]){
-        try{
-          if(/\.pdf$/i.test(f.name)||f.type==='application/pdf'){
-            const u8=new Uint8Array(await f.arrayBuffer());
-            if(pdfStr(u8.subarray(0,5))!=='%PDF-') throw new Error('kein PDF');
-            nP+=fxQuelle(await fxAddPdf(u8,f.name));
-            continue;
-          }
-          const text=await f.text();
-          const kopf=(text.replace(/^﻿/,'').split(/\r?\n/)[0]||'');
-          if(/transaction_type/.test(kopf)){ nT+=fxQuelle(fxParseTx(text,f.name)); }
-          else if(/Article ID/i.test(kopf)) nV+=fxAddSales(rcParse(text),f.name);
-          else fehler.push(f.name);
-        }catch(e){ fehler.push(f.name); }
-      }
-      draw();
-      const teile=[];
-      if(nP) teile.push(nP+' Rechnungspositionen');
-      if(nT) teile.push(nT+' Gebühren aus der Transaktionsliste');
-      if(nV) teile.push(nV+' Verkäufe');
-      toast(fehler.length?`${fehler.length===1?'Eine Datei':fehler.length+' Dateien'} nicht erkannt`
-        :(teile.join(' · ')||'Nichts gelesen'));
-    };
-    inp.click();
-  };
+  const pick=$('#fxPick'); if(pick)pick.onclick=()=>dateiWahl(CSVPDF_TYPEN,true,async fs=>{
+    let nP=0,nT=0,nV=0,grund='';
+    if(!fs.length){ toast('Keine Datei gewählt'); return; }
+    for(const f of fs){
+      try{
+        if(/\.pdf$/i.test(f.name)||f.type==='application/pdf'){
+          const u8=new Uint8Array(await f.arrayBuffer());
+          if(pdfStr(u8.subarray(0,5))!=='%PDF-') throw new Error('Das ist keine PDF-Datei');
+          nP+=fxQuelle(await fxAddPdf(u8,f.name));
+          continue;
+        }
+        const text=await f.text();
+        const kopf=(text.replace(/^﻿/,'').split(/\r?\n/)[0]||'');
+        if(/transaction_type/.test(kopf)) nT+=fxQuelle(fxParseTx(text,f.name));
+        else if(/Article ID/i.test(kopf)) nV+=fxAddSales(rcParse(text),f.name);
+        else throw new Error('Weder Rechnung, Transaktionsliste noch Verkaufsbericht');
+      }catch(e){ if(!grund) grund=e.message||'Datei nicht lesbar'; }
+    }
+    draw();
+    const teile=[];
+    if(nP) teile.push(nP+' Rechnungspositionen');
+    if(nT) teile.push(nT+' Gebühren aus der Transaktionsliste');
+    if(nV) teile.push(nV+' Verkäufe');
+    toast(teile.length?teile.join(' · '):(grund||'Nichts gelesen'));
+  });
   for(const el of $$('[data-fxweg]')) el.onclick=()=>{ S.quellen.splice(+el.dataset.fxweg,1); draw(); };
   const leer=$('#fxLeer'); if(leer)leer.onclick=()=>{ S.quellen=[]; S.sales=null; S.plan=null; S.aus={}; draw(); };
   const run=$('#fxRun'); if(run)run.onclick=()=>{ S.aus={}; S.alle=false; S.plan=fxPlan();
