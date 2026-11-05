@@ -156,6 +156,16 @@ main{padding:0;min-width:0}
 tr.sumrow td{border-top:1px solid var(--line);background:var(--surface-2)}
 .expbar{display:flex;gap:6px;align-items:center}
 .skuhint{display:block;margin-top:3px;font-size:11.5px}
+.rc-liste{display:flex;flex-direction:column;gap:9px}
+.rc-zeile{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+.rc-zeile.rc-offen{border-color:var(--gold-soft);background:var(--gold-bg)}
+.rc-kopf{display:flex;flex-wrap:wrap;gap:8px;align-items:baseline;margin-bottom:7px}
+.rc-kopf b{font-weight:500}
+.rc-teil{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:5px}
+.rc-teil input{background:var(--surface-2);border:1px solid var(--line);color:var(--ink);
+  border-radius:7px;padding:5px 8px;font:inherit;font-size:13px}
+.rc-teil input[data-rc=sku]{flex:1;min-width:170px}
+.rc-anteil{min-width:88px;text-align:right}
 .legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--muted);margin-top:6px}
 .legend span{display:inline-flex;align-items:center;gap:6px}
 .swatch{width:11px;height:11px;border-radius:3px;flex:none}
@@ -523,6 +533,9 @@ const SYNC=(typeof window.__SYNC_URL__==='string'?window.__SYNC_URL__:'').trim()
 const FILES_BASE=SYNC?SYNC.replace(/\/vault\/?$/,'/files'):'';
 const NEWS_BASE=SYNC?SYNC.replace(/\/vault\/?$/,'/news'):'';
 const store={wareneingang:[],preorder:[],warenausgang:[],laufende_kosten:[]};
+// Gelernte Zuordnungen (Inseratstitel -> SKU, Bundle-Bestandteile). Liegt im
+// Tresor und wandert damit ueber den Sync auf alle Geraete.
+let maps={};
 let ready={wareneingang:false,preorder:false,warenausgang:false,laufende_kosten:false};
 let session=null;         // {key:CryptoKey, salt:Uint8Array, pass:string}
 let saveTimer=null, pushTimer=null;
@@ -590,12 +603,13 @@ async function decryptBytes(bytes,pass){
 /* ---------- unlock / persistence ---------- */
 function lsGet(k){ try{return localStorage.getItem(k)}catch(e){return null} }
 function lsSet(k,v){ try{localStorage.setItem(k,v)}catch(e){toast('Speicher nicht verfügbar');} }
-function snapshot(){ const o={_saved:new Date().toISOString()};
+function snapshot(){ const o={_saved:new Date().toISOString(),maps};
   for(const L of LEDGERS) o[L]=store[L];
   return o; }
 // Ältere Backups kennen „preorder“ noch nicht – fehlende Journale werden einfach leer.
 function loadInto(data){
   for(const L of LEDGERS){ store[L]=Array.isArray(data[L])?data[L]:[]; ready[L]=true; }
+  maps=(data.maps&&typeof data.maps==='object')?data.maps:{};   // aeltere Tresore kennen das noch nicht
 }
 
 /* Zentrale Anmeldung: probiert lokalen Tresor -> Cloud -> Seed -> Neuanlage.
@@ -872,11 +886,13 @@ function draw(){
   else if(route==='find') v.innerHTML=viewFind();
   else if(route==='erfolg') v.innerHTML=viewErfolg();
   else if(route==='bilanz') v.innerHTML=viewBilanz();
+  else if(route==='rcimport') v.innerHTML=viewRcImport();
   else v.innerHTML=viewLedger(route);
   wire();
   if(route==='overview') drawChart();
   if(route==='news') wireNews();
   if(route==='find') wireFind();
+  if(route==='rcimport') wireRcImport();
 }
 
 /* ---------- Overview ---------- */
@@ -1150,6 +1166,7 @@ function viewLedger(L){
   <div class="phead">
     <div><h1>${title}</h1><p>${sub}</p></div>
     <div class="expbar">${exportBar()}
+      ${L==='warenausgang'?`<button class="btn ghost" id="rcBtn" title="Verkaufsbericht von ricardo.ch einlesen">Ricardo-Import</button>`:''}
       <button class="btn" id="addBtn"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>Neuer Eintrag</button></div>
   </div>
 
@@ -1294,6 +1311,241 @@ function viewLager(){
   </table></div>
   <p class="chart-hint" style="margin-top:10px">Ø EK/Stk = gesamte Einkaufskosten (brutto) einer SKU geteilt durch die gesamte eingekaufte Menge.
   Warenwert und Rohertrag verwenden diesen Durchschnitt. Bei negativem Bestand stimmen Ein- oder Ausgänge nicht überein.</p>`;
+}
+
+/* ---------- Verkäufe von ricardo.ch einlesen ---------- */
+// Ricardo gibt einen CSV-Bericht mit Semikolon als Trenner. Darin steht der
+// Inseratstitel, nicht deine SKU – die Zuordnung lernt die App und merkt sie sich.
+// Zwei Eigenheiten des Exports: ItemQuantity ist immer 1 (die echte Stückzahl
+// steht vorne im Titel, "8x Booster"), und Gebühren fehlen ganz.
+const RICARDO_FEE=0.10;
+const rcSplitLine=l=>l.split(';');
+function rcParse(text){
+  const zeilen=text.replace(/^﻿/,'').trim().split(/\r?\n/);
+  if(!zeilen.length) return [];
+  const kopf=rcSplitLine(zeilen[0]).map(s=>s.trim());
+  const idx=n=>kopf.indexOf(n);
+  const iT=idx('ArticleTitle'), iP=idx('Selling Price'), iD=idx('EndDate');
+  if(iT<0||iP<0||iD<0) throw new Error('Das sieht nicht nach einem Ricardo-Verkaufsbericht aus');
+  const iS=idx('ShippingCost'), iB=idx('BuyerNick'), iA=idx('Article ID'), iO=idx('Order ID');
+  const out=[];
+  for(const z of zeilen.slice(1)){
+    const v=rcSplitLine(z);
+    if(v.length<kopf.length-1||!v[iT]) continue;
+    // "03.11.26 22:31" -> 2026-11-03
+    const m=String(v[iD]||'').match(/(\d{2})\.(\d{2})\.(\d{2,4})/);
+    const d=m?`${m[3].length===2?'20'+m[3]:m[3]}-${m[2]}-${m[1]}`:'';
+    out.push({artikel:v[iA]||'', bestellung:v[iO]||'', titel:String(v[iT]).trim(), d,
+      preis:num(v[iP]), versand:num(v[iS]), kaeufer:(v[iB]||'').trim()});
+  }
+  return out;
+}
+// Menge aus dem Titelanfang: "8x …", "2 x…", "10x …"
+function rcMenge(titel){
+  const m=String(titel).match(/^\s*(\d{1,3})\s*x\s*/i);
+  return m?Math.max(1,parseInt(m[1],10)):1;
+}
+// Bestandteile eines Bundles. Nur was eine eigene Mengenangabe hat, zählt als
+// Bestandteil – sonst wäre "Holo(+Reverse)-Lot" plötzlich ein Bundle.
+function rcTeile(titel){
+  const t=String(titel);
+  // "7x Produkte", "5 Produkte": Inhalt unbekannt, da muss gefragt werden.
+  const unbek=t.match(/(\d{1,2})\s*x?\s*Produkte/i);
+  let quelle='';
+  const klammer=[...t.matchAll(/\(([^()]*)\)/g)].map(x=>x[1]).filter(s=>/\d\s*x/i.test(s));
+  if(klammer.length) quelle=klammer[klammer.length-1];
+  else { const dp=t.split(/:\s*/).slice(1).join(': '); if(/\d\s*x/i.test(dp)) quelle=dp; }
+  const teile=[];
+  if(quelle){
+    for(const st of quelle.split(/\s*\+\s*|\s*,\s*/)){
+      const m=st.trim().match(/^(\d{1,3})\s*x\s*(.+)$/i);
+      // Sprachkuerzel am Ende gehoert zum Inseratstitel, nicht zum Bestandteil.
+      if(m) teile.push({menge:parseInt(m[1],10),
+        label:m[2].replace(/[.\s]+$/,'').replace(/\s+(EN|DE|FR|IT|JP|KR|CN)$/i,'').replace(/[.\s]+$/,'').trim()});
+    }
+  }
+  if(teile.length>=2) return {art:'teile', teile};
+  if(unbek) return {art:'unbekannt', anzahl:parseInt(unbek[1],10)};
+  return {art:'einzeln'};
+}
+
+// Gelernte Zuordnungen. Liegen im Tresor, wandern also mit dem Sync aufs Handy.
+const rcMaps=()=>{ maps.titel=maps.titel||{}; maps.teil=maps.teil||{}; maps.bundle=maps.bundle||{}; return maps; };
+// Eine Zeile aus dem Bericht in den Zustand bringen, den die Import-Ansicht braucht.
+function rcZeile(r){
+  const m=rcMaps(), t=rcTeile(r.titel), menge=rcMenge(r.titel);
+  const z={...r, menge, art:t.art, offen:t.art==='unbekannt'?t.anzahl:0, teile:[]};
+  if(t.art==='teile'){
+    const bek=m.bundle[r.titel];
+    z.teile=t.teile.map((x,i)=>{
+      const g=(bek&&bek[i])||m.teil[x.label]||{};
+      return {menge:x.menge,label:x.label,sku:g.sku||'',b:num(g.b)||0};
+    });
+  }else if(t.art==='unbekannt'){
+    const bek=m.bundle[r.titel];
+    z.teile=bek?bek.map(x=>({menge:x.menge||1,label:x.label||'',sku:x.sku||'',b:num(x.b)||0}))
+      :[{menge:1,label:'',sku:'',b:0}];
+  }else{
+    z.sku=(m.titel[r.titel]||{}).sku||'';
+  }
+  return z;
+}
+// Aufteilung des Verkaufspreises nach Anzahl Booster-Packs je Bestandteil.
+function rcSplit(z){
+  if(z.art==='einzeln') return [{sku:z.sku,menge:z.menge,anteil:1}];
+  const gew=z.teile.map(t=>t.menge*(num(t.b)||0));
+  const summe=gew.reduce((a,b)=>a+b,0);
+  // Ohne Booster-Zahlen kann nicht gewichtet werden – dann zu gleichen Teilen.
+  const gleich=!summe;
+  return z.teile.map((t,i)=>({sku:t.sku,menge:t.menge,
+    anteil:gleich?(1/z.teile.length):(gew[i]/summe)}));
+}
+const rcOffen=z=>z.art==='einzeln'?!z.sku
+  :(!z.teile.length||z.teile.some(t=>!t.sku||!t.label||!num(t.b)));
+// Aus einer fertig zugeordneten Zeile die Verkaufsbuchungen machen.
+function rcBuchungen(z,feePct){
+  const teile=rcSplit(z), hin=[];
+  const r2=v=>+Number(v).toFixed(2);
+  let restP=r2(z.preis), restV=r2(z.versand);
+  teile.forEach((t,i)=>{
+    const letzte=i===teile.length-1;
+    const preis=letzte?restP:r2(z.preis*t.anteil);
+    const vers=letzte?restV:r2(z.versand*t.anteil);
+    restP=r2(restP-preis); restV=r2(restV-vers);
+    const geb=r2(preis*feePct/100);
+    const vor=[...rows('warenausgang'),...rows('wareneingang'),...rows('preorder')]
+      .filter(x=>x.sku===t.sku).sort((a,b)=>(b.d||'').localeCompare(a.d||''))[0]||{};
+    hin.push({id:uid(),d:z.d,sku:t.sku,cat:vor.cat||'',form:vor.form||'',set:vor.set||'',
+      qty:t.menge,price:preis,cust:vers,fees:geb,porto:0,
+      net:r2(preis+vers-geb),shop:'ricardo.ch',person:z.kaeufer,
+      bem:z.titel+(z.artikel?' · Ricardo '+z.artikel:'')});
+  });
+  return hin;
+}
+
+const rcState={zeilen:null,datei:'',fee:10};
+function rcSkuListe(){
+  return [...new Set([...rows('warenausgang'),...rows('wareneingang'),...rows('preorder')]
+    .map(r=>r.sku).filter(Boolean))].sort();
+}
+function viewRcImport(){
+  const zs=rcState.zeilen;
+  const dl=`<datalist id="dl_rcsku">${rcSkuListe().map(s=>`<option value="${esc(s)}">`).join('')}</datalist>`;
+  if(!zs) return `
+  <div class="phead"><div><h1>Ricardo-Import</h1>
+    <p>Verkaufsbericht von ricardo.ch einlesen – Zuordnungen merkt sich die App.</p></div>
+    <button class="btn ghost" id="rcBack">Zurück</button></div>
+  <div class="card"><h2>Bericht auswählen</h2>
+    <div class="cap">Bei Ricardo unter <b>Verkaufen → Verkaufsübersicht → Bericht herunterladen</b>.
+      Die Datei bleibt auf deinem Gerät, es wird nichts hochgeladen.</div>
+    <div class="toolbar" style="margin-top:10px">
+      <button class="btn" id="rcPick">CSV auswählen…</button>
+      <span class="count">Gebühren: <input type="text" inputmode="decimal" id="rcFee" value="${rcState.fee}"
+        style="width:54px;text-align:right"> % vom Verkaufspreis</span>
+    </div>
+    <p class="chart-hint">Der Bericht enthält keine Gebühren, darum der Prozentsatz. Porto trägst du
+      wie bisher selbst nach – was du der Post zahlst, weiss Ricardo nicht.</p></div>`;
+
+  const offen=zs.filter(rcOffen).length;
+  const bereit=zs.length-offen;
+  const row=(z,i)=>{
+    const teile=z.art==='einzeln'?null:rcSplit(z);
+    const kopf=`<div class="rc-kopf"><span class="mono count">${DDE(z.d)}</span>
+      <b>${esc(z.titel)}</b>
+      <span class="count">${CHF(z.preis)}${z.versand?' + '+CHF(z.versand)+' Versand':''} · ${esc(z.kaeufer||'—')}</span></div>`;
+    if(z.art==='einzeln') return `<div class="rc-zeile ${rcOffen(z)?'rc-offen':''}" data-i="${i}">${kopf}
+      <div class="rc-teil"><span class="count">${z.menge}&times;</span>
+        <input type="text" list="dl_rcsku" data-rc="sku" data-i="${i}" placeholder="SKU zuordnen…"
+          value="${esc(z.sku||'')}" autocomplete="off"></div></div>`;
+    return `<div class="rc-zeile ${rcOffen(z)?'rc-offen':''}" data-i="${i}">${kopf}
+      ${z.art==='unbekannt'?`<div class="cap">Inhalt steht nicht im Titel (${z.offen} Produkte) – bitte eintragen.</div>`:''}
+      ${z.teile.map((t,j)=>`<div class="rc-teil">
+        <input type="text" inputmode="numeric" data-rc="menge" data-i="${i}" data-j="${j}" value="${t.menge}" style="width:46px" title="Stückzahl">
+        <input type="text" data-rc="label" data-i="${i}" data-j="${j}" value="${esc(t.label)}" placeholder="Bestandteil" style="width:150px">
+        <input type="text" list="dl_rcsku" data-rc="sku" data-i="${i}" data-j="${j}" value="${esc(t.sku)}" placeholder="SKU zuordnen…" autocomplete="off">
+        <input type="text" inputmode="numeric" data-rc="b" data-i="${i}" data-j="${j}" value="${t.b||''}" placeholder="Booster" style="width:74px" title="Anzahl Booster-Packs in diesem Bestandteil">
+        <span class="count rc-anteil" data-i="${i}" data-j="${j}">${teile[j]?CHF(z.preis*teile[j].anteil):''}</span>
+        <button class="iconbtn" data-rcdel="${i}" data-j="${j}" title="Bestandteil entfernen">&times;</button>
+      </div>`).join('')}
+      <button class="btn ghost sm" data-rcadd="${i}">Bestandteil hinzufügen</button></div>`;
+  };
+  return `${dl}
+  <div class="phead"><div><h1>Ricardo-Import</h1>
+    <p>${esc(rcState.datei)} · ${zs.length} Verkäufe · Gebühren ${rcState.fee} %</p></div>
+    <div class="expbar"><button class="btn ghost" id="rcBack">Abbrechen</button>
+      <button class="btn" id="rcGo" ${bereit?'':'disabled'}>${bereit} übernehmen</button></div></div>
+  ${offen?`<div class="banner warn"><span><b>${offen} ${offen===1?'Verkauf braucht':'Verkäufe brauchen'} noch eine Zuordnung.</b>
+    Ohne SKU stimmt das Lager nicht – diese Zeilen bleiben stehen, die übrigen kannst du schon übernehmen.</span></div>`:''}
+  <div class="rc-liste">${zs.map(row).join('')}</div>`;
+}
+function wireRcImport(){
+  const back=$('#rcBack'); if(back)back.onclick=()=>{ rcState.zeilen=null; go('warenausgang'); };
+  const fee=$('#rcFee'); if(fee)fee.onchange=()=>{ rcState.fee=num(fee.value)||0; };
+  const pick=$('#rcPick'); if(pick)pick.onclick=()=>{
+    const inp=document.createElement('input'); inp.type='file'; inp.accept='.csv,text/csv';
+    inp.onchange=async()=>{
+      const f=inp.files[0]; if(!f)return;
+      try{
+        const roh=rcParse(await f.text());
+        if(!roh.length){ toast('Keine Verkäufe in der Datei'); return; }
+        rcState.datei=f.name; rcState.zeilen=roh.map(rcZeile); draw();
+      }catch(e){ toast(e.message||'Datei nicht lesbar'); }
+    };
+    inp.click();
+  };
+  // Eingaben übernehmen, ohne die Ansicht neu zu zeichnen – sonst springt der Fokus.
+  for(const el of $$('[data-rc]')){
+    el.oninput=()=>{
+      const z=rcState.zeilen[+el.dataset.i]; if(!z)return;
+      const k=el.dataset.rc;
+      if(el.dataset.j===undefined){ z.sku=el.value.trim(); }
+      else{ const t=z.teile[+el.dataset.j];
+        if(k==='menge')t.menge=Math.max(1,parseInt(el.value,10)||1);
+        else if(k==='b')t.b=num(el.value);
+        else t[k]=el.value.trim(); }
+      rcRefresh(+el.dataset.i);
+    };
+  }
+  for(const b of $$('[data-rcadd]')) b.onclick=()=>{
+    const z=rcState.zeilen[+b.dataset.rcadd];
+    z.teile.push({menge:1,label:'',sku:'',b:0}); draw();
+  };
+  for(const b of $$('[data-rcdel]')) b.onclick=()=>{
+    const z=rcState.zeilen[+b.dataset.rcdel];
+    if(z.teile.length>1){ z.teile.splice(+b.dataset.j,1); draw(); }
+  };
+  const ok=$('#rcGo'); if(ok)ok.onclick=rcUebernehmen;
+}
+// Anteile und Markierung einer Zeile neu rechnen, ohne alles neu zu zeichnen.
+function rcRefresh(i){
+  const z=rcState.zeilen[i]; if(!z)return;
+  const box=document.querySelector(`.rc-zeile[data-i="${i}"]`);
+  if(box) box.classList.toggle('rc-offen',rcOffen(z));
+  if(z.art!=='einzeln'){
+    const teile=rcSplit(z);
+    for(const s of $$(`.rc-anteil[data-i="${i}"]`)){
+      const j=+s.dataset.j; s.textContent=teile[j]?CHF(z.preis*teile[j].anteil):'';
+    }
+  }
+  const bereit=rcState.zeilen.filter(x=>!rcOffen(x)).length;
+  const btn=$('#rcGo'); if(btn){ btn.textContent=bereit+' übernehmen'; btn.disabled=!bereit; }
+}
+async function rcUebernehmen(){
+  const fertig=rcState.zeilen.filter(z=>!rcOffen(z));
+  if(!fertig.length) return;
+  const m=rcMaps(); let n=0;
+  for(const z of fertig){
+    for(const b of rcBuchungen(z,rcState.fee)){ store.warenausgang.push(b); n++; }
+    // Zuordnung merken: beim nächsten Bericht läuft dieselbe Zeile durch.
+    if(z.art==='einzeln') m.titel[z.titel]={sku:z.sku};
+    else{ m.bundle[z.titel]=z.teile.map(t=>({menge:t.menge,label:t.label,sku:t.sku,b:t.b}));
+      for(const t of z.teile) m.teil[t.label]={sku:t.sku,b:t.b}; }
+  }
+  persist();
+  const rest=rcState.zeilen.filter(rcOffen);
+  rcState.zeilen=rest.length?rest:null;
+  toast(`${n} Verkäufe übernommen${rest.length?', '+rest.length+' offen':''}`);
+  if(!rest.length) go('warenausgang'); else draw();
 }
 
 /* ---------- Export: Excel und PDF ---------- */
@@ -2069,6 +2321,7 @@ function wire(){
   wireExport();
   const p=$('#period'); if(p)p.onchange=()=>{period=p.value;draw();};
   const add=$('#addBtn'); if(add)add.onclick=()=>openForm(route,null);
+  const rc=$('#rcBtn'); if(rc)rc.onclick=()=>go('rcimport');
   const q=$('#q'); if(q)q.oninput=debounce(()=>{state.q=q.value;page=0;draw();
     const el=$('#q'); if(el){el.focus();el.setSelectionRange(el.value.length,el.value.length);}},220);
   const fc=$('#fCat'); if(fc)fc.onchange=()=>{state.cat=fc.value;page=0;draw();};
