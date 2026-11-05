@@ -154,6 +154,7 @@ main{padding:0;min-width:0}
 .card-row{display:grid;grid-template-columns:1.6fr 1fr;gap:14px}
 .card-row.even{grid-template-columns:1fr 1fr}
 tr.sumrow td{border-top:1px solid var(--line);background:var(--surface-2)}
+.expbar{display:flex;gap:6px;align-items:center}
 .legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--muted);margin-top:6px}
 .legend span{display:inline-flex;align-items:center;gap:6px}
 .swatch{width:11px;height:11px;border-radius:3px;flex:none}
@@ -305,6 +306,20 @@ thead th:first-child,thead th:last-child{z-index:4}
   .kpi .v{font-size:19.5px}
   .kpi{padding:13px 12px}
 }
+@media print{
+  /* Fuer den PDF-Druck: nur der Inhalt, ohne Navigation und Bedienelemente. */
+  @page{margin:14mm}
+  #side,#topbar,.toolbar,.field,.btn,.pager,.rowact,.iconbtn,.navlink{display:none!important}
+  body,main,.wrap{background:#fff!important;color:#000!important}
+  .wrap{max-width:none;padding:0}
+  .card,.kpi,.tbl-wrap{break-inside:avoid;box-shadow:none}
+  table{font-size:10.5px}
+  thead{display:table-header-group}
+  tr{break-inside:avoid}
+  .chart-hint,.count,.cap{color:#444!important}
+  #printfoot{display:block!important;margin-top:14px;font-size:10px;color:#555}
+}
+#printfoot{display:none}
 @media (max-width:900px){
   #topbar{padding:10px 14px}
   .topbar-brand{font-size:14px}
@@ -802,7 +817,7 @@ const NAV=[
   ['laufende_kosten','Laufende Kosten','M3 6h18M3 12h18M3 18h12'],
   ['lager','Lager','M3 7l9-4 9 4-9 4-9-4zM3 7v10l9 4 9-4V7'],
   ['erfolg','Erfolgsrechnung','M4 19V5m0 14h16M8 15l3-4 3 3 4-6'],
-  ['bilanz','Bilanz','M12 4v16M5 8h14M7 8l-3 6h6zM17 8l-3 6h6z',true],
+  ['bilanz','Bilanz','M12 4v16M5 8h14M7 8l-3 6h6zM17 8l-3 6h6z'],
   ['news','News','M4 5h13a2 2 0 012 2v12H6a2 2 0 01-2-2V5zM19 9h2v8a2 2 0 01-2 2M8 9h7M8 13h7'],
   ['find','Suche','M11 18a7 7 0 110-14 7 7 0 010 14zM21 21l-4.3-4.3',true],
 ];
@@ -891,13 +906,17 @@ function viewOverview(){
   const catMax=Math.max(1,...catList.map(c=>c[1].um));
 
   const topSets=lgPeriod.filter(o=>o.sellQty>0).sort((x,y)=>y.margin-x.margin);
+  currentExport={name:'Übersicht',cols:[['m','Monat','s'],['um','Umsatz','n'],['ein','Wareneinkauf','n'],
+    ['kos','Laufende Kosten','n'],['saldo','Saldo','n']],
+    rows:a.ms.map(m=>({m:monthName(m),um:a.per[m].um,ein:a.per[m].ein,kos:a.per[m].kos,
+      saldo:a.per[m].um-a.per[m].ein-a.per[m].kos}))};
 
   return `
   <div class="phead">
     <div><h1>Übersicht</h1><p>Einnahmen, Ausgaben und Ergebnis auf einen Blick</p></div>
-    <div class="field"><select id="period">
+    <div class="expbar">${exportBar()}<div class="field"><select id="period">
       ${periodOpts()}
-    </select></div>
+    </select></div></div>
   </div>
 
   <div class="kpis">
@@ -1109,6 +1128,7 @@ function viewLedger(L){
   if(page<0)page=0;
   const slice=f.slice(page*PAGE,page*PAGE+PAGE);
   currentSlice=slice; currentFiltered=f;
+  currentExport={name:title,cols:COLS[L],rows:f};
 
   // totals
   const sum=k=>f.reduce((s,r)=>s+num(r[k]),0);
@@ -1125,7 +1145,8 @@ function viewLedger(L){
   return `
   <div class="phead">
     <div><h1>${title}</h1><p>${sub}</p></div>
-    <button class="btn" id="addBtn"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>Neuer Eintrag</button>
+    <div class="expbar">${exportBar()}
+      <button class="btn" id="addBtn"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>Neuer Eintrag</button></div>
   </div>
 
   <div class="toolbar">
@@ -1222,11 +1243,12 @@ function viewLager(){
     return x<y?-dir:x>y?dir:0; });
   const T={buy:0,sell:0,stockVal:0,net:0,margin:0};
   f.forEach(o=>{T.buy+=o.buyQty;T.sell+=o.sellQty;T.stockVal+=Math.max(0,o.stockVal);T.net+=o.net;T.margin+=o.margin;});
+  currentExport={name:'Lager',cols:LCOLS,rows:f};
 
   return `
   <div class="phead">
     <div><h1>Lager</h1><p>Automatisch aus Ein- und Ausgängen berechnet · Ø Einkaufspreis pro Stück je SKU</p></div>
-    <button class="btn ghost sm" id="exportBtn"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>CSV</button>
+    ${exportBar()}<button class="btn ghost sm" id="exportBtn"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>CSV</button>
   </div>
   <div class="kpis kpis-4">
     <div class="kpi"><span class="lbl">Positionen</span><span class="v">${f.length}</span><span class="sub">${N0(T.buy-T.sell)} Stück am Lager</span></div>
@@ -1268,6 +1290,84 @@ function viewLager(){
   </table></div>
   <p class="chart-hint" style="margin-top:10px">Ø EK/Stk = gesamte Einkaufskosten (brutto) einer SKU geteilt durch die gesamte eingekaufte Menge.
   Warenwert und Rohertrag verwenden diesen Durchschnitt. Bei negativem Bestand stimmen Ein- oder Ausgänge nicht überein.</p>`;
+}
+
+/* ---------- Export: Excel und PDF ---------- */
+// Eine .xlsx ist ein Zip mit ein paar XML-Dateien. Gespeichert wird hier
+// unkomprimiert (Methode 0) – das spart den Deflate-Code, und Excel stört sich
+// nicht daran. So braucht der Export keine fremde Bibliothek.
+const xesc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))
+  .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g,'');
+const colName=i=>{let s='';i++;while(i>0){const r=(i-1)%26;s=String.fromCharCode(65+r)+s;i=(i-r-1)/26;}return s;};
+// rows: Array von Arrays. Zahl -> Zahlenzelle, sonst Text. head = erste Zeile fett.
+function xlsxBlob(sheetName,rows){
+  const cells=rows.map((row,r)=>'<row r="'+(r+1)+'">'+row.map((v,c)=>{
+    const ref=colName(c)+(r+1);
+    if(typeof v==='number'&&isFinite(v)) return '<c r="'+ref+'" s="'+(r?2:3)+'"><v>'+v+'</v></c>';
+    return '<c r="'+ref+'" t="inlineStr" s="'+(r?0:1)+'"><is><t xml:space="preserve">'+xesc(v)+'</t></is></c>';
+  }).join('')+'</row>').join('');
+  const sheet='<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+    +'<sheetData>'+cells+'</sheetData></worksheet>';
+  const styles='<?xml version="1.0" encoding="UTF-8"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+    +'<fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts>'
+    +'<fills count="1"><fill><patternFill patternType="none"/></fill></fills>'
+    +'<borders count="1"><border/></borders>'
+    +'<cellStyleXfs count="1"><xf/></cellStyleXfs>'
+    +'<cellXfs count="4"><xf xfId="0"/><xf xfId="0" fontId="1" applyFont="1"/>'
+    +'<xf xfId="0" numFmtId="4" applyNumberFormat="1"/>'
+    +'<xf xfId="0" fontId="1" numFmtId="4" applyFont="1" applyNumberFormat="1"/></cellXfs></styleSheet>';
+  const enc=new TextEncoder(), f=(name,text)=>({name,data:enc.encode(text)});
+  return buildZip([
+    f('[Content_Types].xml','<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+      +'<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+      +'<Default Extension="xml" ContentType="application/xml"/>'
+      +'<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+      +'<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+      +'<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>'),
+    f('_rels/.rels','<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+      +'<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>'),
+    f('xl/workbook.xml','<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+      +'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>'
+      +'<sheet name="'+xesc(sheetName).slice(0,31)+'" sheetId="1" r:id="rId1"/></sheets></workbook>'),
+    f('xl/_rels/workbook.xml.rels','<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+      +'<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
+      +'<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>'),
+    f('xl/styles.xml',styles),
+    f('xl/worksheets/sheet1.xml',sheet),
+  ]);
+}
+
+// Was die aktuelle Ansicht ausgeben wuerde. Jede Ansicht setzt das beim Zeichnen.
+let currentExport=null;
+const expName=()=>{
+  const t=(currentExport&&currentExport.name)||'Export';
+  const p=period==='all'?'gesamt':period.replace('m:','');
+  return (t+'_'+p).replace(/[^\wÀ-ÿ-]+/g,'_');
+};
+function exportBar(){
+  return `<div class="expbar"><button class="btn ghost sm" id="expPdf" title="Über den Druckdialog als PDF sichern">
+      <svg viewBox="0 0 24 24"><path d="M6 9V3h12v6M6 18H4v-6h16v6h-2M8 14h8v7H8z"/></svg>PDF</button>
+    <button class="btn ghost sm" id="expXls" title="Als Excel-Datei herunterladen">
+      <svg viewBox="0 0 24 24"><path d="M4 4h16v16H4zM9 9l6 6M15 9l-6 6"/></svg>Excel</button></div>`;
+}
+function wireExport(){
+  const p=$('#expPdf'); if(p)p.onclick=()=>window.print();
+  const x=$('#expXls'); if(x)x.onclick=()=>{
+    if(!currentExport){ toast('Für diese Ansicht gibt es keinen Export'); return; }
+    const {name,cols,rows}=currentExport;
+    const kopf=cols.map(c=>c[1]);
+    const daten=rows.map(r=>cols.map(([k,,t])=>{
+      const v=r[k];
+      if(t==='n') return num(v);
+      if(t==='d') return String(v==null?'':v);
+      return v==null?'':String(v);
+    }));
+    try{
+      downloadFile(expName()+'.xlsx', xlsxBlob(name,[kopf,...daten]),
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      toast(`${daten.length} Zeilen als Excel gespeichert`);
+    }catch(e){ toast('Export fehlgeschlagen: '+(e.message||e)); }
+  };
 }
 
 /* ---------- Abschluss: Erfolgsrechnung und Bilanz ---------- */
@@ -1329,6 +1429,9 @@ function abschluss(){
   const wareneinsatz=vp.reduce((s,r)=>s+num(r.qty)*(unitBis.get(r.sku||r.set||'—')||0),0);
   const bruttogewinn=nettoerloes-wareneinsatz;
 
+  // Fuer die Ueberleitung zum Saldo der Uebersicht gebraucht.
+  const einkaufZeitraum=ein.filter(inP).reduce((s,r)=>s+num(r.gross),0);
+  const preorderZeitraum=pre.filter(inP).reduce((s,r)=>s+num(r.gross),0);
   const kat={};
   for(const r of kos.filter(inP)){ const c=r.cat||'Sonstiges'; kat[c]=(kat[c]||0)+num(r.total); }
   const katListe=Object.entries(kat).sort((a,b)=>b[1]-a[1]);
@@ -1365,22 +1468,67 @@ function abschluss(){
   const aktiven=fluessig+anzahlungen+bestandEnde-reserveEnde;
   const passiven=gewinnAll-reserveEnde;
   return {bis,vor,erloes,versandKd,gebuehren,porto,nettoerloes,wareneinsatz,bruttogewinn,
+    einkaufZeitraum,preorderZeitraum,kostenZeitraum:betriebsaufwand,
     katListe,betriebsaufwand,betriebsergebnis,bestandEnde,bestandStart,reserveEnde,reserveStart,
     reserveDelta,ergebnisSteuer,anzahlungen,fluessig,gewinnAll,aktiven,passiven,ohneEingang,
     diff:+(aktiven-passiven).toFixed(2)};
 }
 
-const kRow=(k,t,v,cls)=>`<tr class="${cls||''}"><td class="mono">${k||''}</td><td>${t}</td>
-  <td class="num">${v==null?'':CHF(v)}</td></tr>`;
-const kSum=(t,v)=>`<tr class="sumrow"><td></td><td><b>${t}</b></td><td class="num"><b>${CHF(v)}</b></td></tr>`;
+// Die Zeilen entstehen einmal als Daten: die Ansicht zeichnet sie, der Export
+// schreibt dieselben in die Excel-Datei. So kann beides nicht auseinanderlaufen.
+const zRow=(k,t,v)=>({k,t,v});
+const zSum=(t,v)=>({k:'',t,v,sum:true});
+const zRender=l=>l.map(z=>`<tr class="${z.sum?'sumrow':''}"><td class="mono">${esc(z.k||'')}</td>
+  <td>${z.sum?'<b>'+esc(z.t)+'</b>':esc(z.t)}</td>
+  <td class="num">${z.v==null?'':(z.sum?'<b>'+CHF(z.v)+'</b>':CHF(z.v))}</td></tr>`).join('');
+const ZCOLS=[['k','Konto','s'],['t','Bezeichnung','s'],['v','Betrag','n']];
+
+function erfolgZeilen(a){
+  const l=[zRow('3200','Handelserlöse',a.erloes)];
+  if(a.versandKd) l.push(zRow('3200','Versandbeiträge der Käufer',a.versandKd));
+  if(a.gebuehren) l.push(zRow('3800','Erlösminderungen – Verkaufsgebühren',-a.gebuehren));
+  if(a.porto) l.push(zRow('3800','Erlösminderungen – Porto und Verpackung',-a.porto));
+  l.push(zSum('Nettoerlös aus Lieferungen und Leistungen',a.nettoerloes));
+  l.push(zRow('4200','Handelswarenaufwand (Einstandspreis der verkauften Ware)',-a.wareneinsatz));
+  l.push(zSum('Bruttogewinn',a.bruttogewinn));
+  for(const [c,v] of a.katListe) l.push(zRow(kontoFor(c),'Betriebsaufwand – '+c,-v));
+  l.push(zSum('Betriebsergebnis',a.betriebsergebnis));
+  l.push(zRow('1209',(a.reserveDelta>=0?'Bildung':'Auflösung')+' Warenreserve (Warendrittel)',-a.reserveDelta));
+  l.push(zSum('Ergebnis nach Warenreserve (steuerlich massgebend)',a.ergebnisSteuer));
+  return l;
+}
+function bilanzZeilen(a){
+  const akt=[zRow('1020','Flüssige Mittel (rechnerisch)',a.fluessig)];
+  if(a.anzahlungen) akt.push(zRow('1140','Anzahlungen an Lieferanten (offene Preorders)',a.anzahlungen));
+  akt.push(zRow('1200','Handelswaren zu Einstandspreisen',a.bestandEnde));
+  if(a.reserveEnde) akt.push(zRow('1209','./. Warenreserve (Warendrittel)',-a.reserveEnde));
+  akt.push(zSum('Total Aktiven',a.aktiven));
+  const pas=[zRow('2800','Eigenkapital – kumuliertes Ergebnis',a.gewinnAll)];
+  if(a.reserveEnde) pas.push(zRow('2800','./. stille Reserve auf dem Warenbestand',-a.reserveEnde));
+  pas.push(zSum('Total Passiven',a.passiven));
+  return {akt,pas};
+}
+// Warum der Saldo der Übersicht nicht dem Betriebsergebnis entspricht.
+function ueberleitung(a){
+  const saldo=a.erloes-a.einkaufZeitraum-a.kostenZeitraum-a.preorderZeitraum;
+  const l=[zRow('','Saldo der Übersicht (Geldfluss: Umsatz − Einkauf − Kosten)',saldo)];
+  if(a.versandKd) l.push(zRow('','+ Versandbeiträge der Käufer',a.versandKd));
+  if(a.gebuehren+a.porto) l.push(zRow('','− Verkaufsgebühren und Porto',-(a.gebuehren+a.porto)));
+  l.push(zRow('','+ Lageraufbau: eingekauft, aber noch nicht verkauft',a.einkaufZeitraum-a.wareneinsatz));
+  if(a.preorderZeitraum) l.push(zRow('','+ Anzahlungen für offene Preorders (kein Aufwand)',a.preorderZeitraum));
+  l.push(zSum('Betriebsergebnis',a.betriebsergebnis));
+  return l;
+}
 
 function viewErfolg(){
   const a=abschluss();
+  const zeilen=erfolgZeilen(a);
+  currentExport={name:'Erfolgsrechnung',cols:ZCOLS,rows:zeilen};
   const zeit=period==='all'?'Gesamter Zeitraum':(periodMonths().length?monthName(periodMonths()[0])+' – '+monthName(a.bis):'—');
   return `
   <div class="phead">
     <div><h1>Erfolgsrechnung</h1><p>Kontenrahmen KMU · ${esc(zeit)}</p></div>
-    <div class="field"><select id="period">${periodOpts()}</select></div>
+    <div class="expbar">${exportBar()}<div class="field"><select id="period">${periodOpts()}</select></div></div>
   </div>
   ${a.ohneEingang.length?`<div class="banner warn"><span><b>${a.ohneEingang.length} verkaufte${a.ohneEingang.length===1?'r Artikel hat':' Artikel haben'} keinen Wareneingang</b>
     (${esc(a.ohneEingang.slice(0,6).join(', '))}${a.ohneEingang.length>6?' …':''}) – ${a.ohneEingang.length===1?'er kostet':'sie kosten'} rechnerisch nichts und
@@ -1397,20 +1545,10 @@ function viewErfolg(){
   </div>
   <div class="tbl-wrap"><table>
     <thead><tr><th style="width:72px">Konto</th><th>Bezeichnung</th><th class="n">Betrag</th></tr></thead>
-    <tbody>
-      ${kRow('3200','Handelserlöse',a.erloes)}
-      ${a.versandKd?kRow('3200','Versandbeiträge der Käufer',a.versandKd):''}
-      ${a.gebuehren?kRow('3800','Erlösminderungen – Verkaufsgebühren',-a.gebuehren):''}
-      ${a.porto?kRow('3800','Erlösminderungen – Porto und Verpackung',-a.porto):''}
-      ${kSum('Nettoerlös aus Lieferungen und Leistungen',a.nettoerloes)}
-      ${kRow('4200','Handelswarenaufwand (Einstandspreis der verkauften Ware)',-a.wareneinsatz)}
-      ${kSum('Bruttogewinn',a.bruttogewinn)}
-      ${a.katListe.length?a.katListe.map(([c,v])=>kRow(kontoFor(c),'Betriebsaufwand – '+esc(c),-v)).join('')
-        :`<tr><td></td><td class="count">keine laufenden Kosten im Zeitraum</td><td></td></tr>`}
-      ${kSum('Betriebsergebnis',a.betriebsergebnis)}
-      ${kRow('1209',(a.reserveDelta>=0?'Bildung':'Auflösung')+' Warenreserve (Warendrittel)',-a.reserveDelta)}
-      ${kSum('Ergebnis nach Warenreserve (steuerlich massgebend)',a.ergebnisSteuer)}
-    </tbody></table></div>
+    <tbody>${zRender(zeilen)}</tbody></table></div>
+  <div class="card" style="margin-top:14px"><h2>Überleitung zum Saldo der Übersicht</h2>
+    <div class="cap">Die Übersicht zeigt den Geldfluss, die Erfolgsrechnung das Ergebnis. Hier steht, woraus der Unterschied besteht.</div>
+    <div class="tbl-wrap"><table><tbody>${zRender(ueberleitung(a))}</tbody></table></div></div>
   <p class="chart-hint"><b>Warenaufwand</b> ist nicht der Einkauf des Zeitraums, sondern was die verkaufte Ware
     gekostet hat – gerechnet mit dem durchschnittlichen Einstandspreis je SKU. Nur so stimmt der Bruttogewinn.
     <b>Offene Preorders</b> erscheinen hier nicht als Aufwand: bezahlte, aber nicht gelieferte Ware ist eine
@@ -1420,11 +1558,14 @@ function viewErfolg(){
 
 function viewBilanz(){
   const a=abschluss();
+  const {akt,pas}=bilanzZeilen(a);
+  currentExport={name:'Bilanz',cols:ZCOLS,
+    rows:[{k:'',t:'AKTIVEN',v:null},...akt,{k:'',t:'',v:null},{k:'',t:'PASSIVEN',v:null},...pas]};
   const stichtag=periodMonths().length?monthName(a.bis):'—';
   return `
   <div class="phead">
     <div><h1>Bilanz</h1><p>Kontenrahmen KMU · Stichtag Ende ${esc(stichtag)}</p></div>
-    <div class="field"><select id="period">${periodOpts()}</select></div>
+    <div class="expbar">${exportBar()}<div class="field"><select id="period">${periodOpts()}</select></div></div>
   </div>
   ${a.diff?`<div class="banner warn"><span><b>Bilanz geht nicht auf (${CHF(a.diff)}).</b>
     Von mindestens einem Artikel wurde mehr verkauft als je eingekauft – dann fehlt ein Wareneingang.</span></div>`:''}
@@ -1443,21 +1584,11 @@ function viewBilanz(){
     <div class="card"><h2>Aktiven</h2>
       <div class="tbl-wrap"><table>
         <thead><tr><th style="width:72px">Konto</th><th>Bezeichnung</th><th class="n">Betrag</th></tr></thead>
-        <tbody>
-          ${kRow('1020','Flüssige Mittel (rechnerisch)',a.fluessig)}
-          ${a.anzahlungen?kRow('1140','Anzahlungen an Lieferanten (offene Preorders)',a.anzahlungen):''}
-          ${kRow('1200','Handelswaren zu Einstandspreisen',a.bestandEnde)}
-          ${a.reserveEnde?kRow('1209','./. Warenreserve (Warendrittel)',-a.reserveEnde):''}
-          ${kSum('Total Aktiven',a.aktiven)}
-        </tbody></table></div></div>
+        <tbody>${zRender(akt)}</tbody></table></div></div>
     <div class="card"><h2>Passiven</h2>
       <div class="tbl-wrap"><table>
         <thead><tr><th style="width:72px">Konto</th><th>Bezeichnung</th><th class="n">Betrag</th></tr></thead>
-        <tbody>
-          ${kRow('2800','Eigenkapital – kumuliertes Ergebnis',a.gewinnAll)}
-          ${a.reserveEnde?kRow('2800','./. stille Reserve auf dem Warenbestand',-a.reserveEnde):''}
-          ${kSum('Total Passiven',a.passiven)}
-        </tbody></table></div>
+        <tbody>${zRender(pas)}</tbody></table></div>
       <p class="chart-hint" style="margin-top:10px">Ohne Anfangskapital und ohne Privatbezüge: das Eigenkapital
         ist alles, was seit dem ersten Eintrag erwirtschaftet wurde.</p></div>
   </div>
@@ -1484,8 +1615,11 @@ function viewFind(){
   const r=find.res;
   const hits=(r&&r.hits)||[];
   const stand=hits.length?hits.map(h=>h.at).sort().slice(-1)[0]:null;
+  currentExport={name:'Suche',cols:[['t','Produkt','s'],['src','Quelle','s'],['p','Preis','n'],
+    ['stat','Status','s'],['lang','Sprache','s'],['g','Franchise','s'],['u','Link','s']],
+    rows:hits.map(h=>({...h,src:h.src||h.s,lang:h.l||'',stat:h.a?'verfügbar':'ausverkauft'}))};
   return `<div class="head"><div><h1>Suche</h1>
-    <p class="sub">Durchsucht alle Artikel, die deine Quellen zuletzt geführt haben – ohne die Shops anzufragen.</p></div></div>
+    <p class="sub">Durchsucht alle Artikel, die deine Quellen zuletzt geführt haben – ohne die Shops anzufragen.</p></div>${exportBar()}</div>
   ${find.err?`<div class="banner warn"><span><b>Suche nicht möglich:</b> ${esc(find.err)}</span></div>`:''}
   <div class="toolbar">
     <div class="field" style="flex:1;min-width:220px"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4-4"/></svg>
@@ -1760,6 +1894,10 @@ function viewNews(){
   const langs=[...new Set(EV.map(e=>e.l).filter(Boolean))]
     .sort((a,b)=>String(NEWS_LANG[a]||a).localeCompare(String(NEWS_LANG[b]||b),'de'));
   const f=EV.filter(e=>(!news.kind||e.k===news.kind)&&(!news.src||e.s===news.src)&&(!news.fr||e.g===news.fr)&&(!news.lang||e.l===news.lang)&&(!q||e.t.toLowerCase().includes(q)));
+  currentExport={name:'News',cols:[['at','Zeitpunkt','s'],['art','Ereignis','s'],['s','Quelle','s'],
+    ['t','Produkt','s'],['p','Preis','n'],['o','vorher','n'],['lang','Sprache','s'],['g','Franchise','s'],
+    ['stat','Status','s'],['u','Link','s']],
+    rows:f.map(e=>({...e,art:NEWS_KIND[e.k]||e.k,lang:e.l||'',stat:e.a?'verfügbar':'ausverkauft'}))};
   const status=d?`Letzter Lauf ${d.lastRun?ago(d.lastRun):'noch nie'} · ${S.filter(s=>!s.off).length} Quellen · ${W.length} beobachtet · Push ${d.push?`<b class="pos">${d.push} Gerät${d.push>1?'e':''}</b>`:'<b class="neg">aus</b>'}`:'';
   const srcStatus=s=>{ const st=s.st;
     if(s.off) return '<span class="count">pausiert</span>';
@@ -1924,6 +2062,7 @@ setInterval(()=>{ if(route==='news'&&document.visibilityState==='visible'&&!news
 
 /* ---------- wiring ---------- */
 function wire(){
+  wireExport();
   const p=$('#period'); if(p)p.onchange=()=>{period=p.value;draw();};
   const add=$('#addBtn'); if(add)add.onclick=()=>openForm(route,null);
   const q=$('#q'); if(q)q.oninput=debounce(()=>{state.q=q.value;page=0;draw();
