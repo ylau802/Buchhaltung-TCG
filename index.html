@@ -1638,7 +1638,7 @@ function zuSollSku(titel){
   return out;
 }
 // Kandidatenzeilen mit Punkten. Je mehr zusammenpasst, desto höher.
-function zuKand(v,nahe,soll){
+function zuKand(v,nahe,soll,max){
   const out=[];
   for(const r of nahe){
     let s=0; const warum=[];
@@ -1667,7 +1667,15 @@ function zuKand(v,nahe,soll){
     if(s>0) out.push({id:r.id,s,warum,sku:r.sku||r.set||'—',d:r.d,price:num(r.price),person:r.person||''});
   }
   out.sort((a,b)=>b.s-a.s||zuTage(a.d,v.d)-zuTage(b.d,v.d));
-  return out.slice(0,12);
+  return out.slice(0,max||12);
+}
+// Was zur Auswahl steht. Zeilen, die schon bei einem anderen Verkauf stehen,
+// bleiben drin – bei einem Sammelkauf braucht es genau das. Zeilen mit
+// passendem Käufer stehen immer dabei, auch wenn die Punkte anderer höher sind.
+function zuAuswahl(v,alle){
+  const mitName=alle.filter(c=>zuNameGleich(c.person,v.kaeufer)>=0.6).slice(0,10);
+  const rest=alle.filter(c=>!mitName.includes(c)).slice(0,12);
+  return [...mitName,...rest];
 }
 // Ein aufgeteiltes Bundle steht als mehrere Zeilen im Warenausgang. Gibt es am
 // selben Tag genau eine Gruppe freier Zeilen, deren Preise zusammen den
@@ -1774,9 +1782,11 @@ function zuRechnen(){
   V.forEach((v,i)=>{
     if(rang[i]) return;
     const soll=zuSollSku(v.titel);
-    const k=zuKand(v,nahe(v.d,14).filter(r=>!benutzt.has(r.id)),soll);
-    kand[i]=k;
-    if(!k.length){ rang[i]='offen'; return; }
+    const alle=zuKand(v,nahe(v.d,14),soll,40);
+    kand[i]=zuAuswahl(v,alle);
+    // Entscheiden darf nur, was noch frei ist – anbieten lässt sich mehr.
+    const k=alle.filter(c=>!benutzt.has(c.id));
+    if(!k.length){ rang[i]=kand[i].length?'pruefen':'offen'; return; }
     if(k[0].s>=95&&(!k[1]||k[0].s-k[1].s>=25)){ zu[i]=[k[0].id]; benutzt.add(k[0].id); rang[i]='sicher'; return; }
     const grp=zuBundle(v,k);
     if(grp){ zu[i]=grp.map(c=>c.id); grp.forEach(c=>benutzt.add(c.id)); rang[i]='sicher'; return; }
@@ -1793,7 +1803,7 @@ function zuRechnen(){
   // ändern kann.
   V.forEach((v,i)=>{
     if(kand[i]||rang[i]==='fertig') return;
-    kand[i]=zuKand(v,nahe(v.d,14),zuSollSku(v.titel));
+    kand[i]=zuAuswahl(v,zuKand(v,nahe(v.d,14),zuSollSku(v.titel),40));
   });
   zuState.zu=zu; zuState.rang=rang; zuState.kand=kand;
 }
@@ -1818,10 +1828,14 @@ function viewRcZuord(){
   Z.verk.forEach((v,i)=>n[Z.rang[i]||'offen']++);
   const liste=Z.verk.map((v,i)=>i).filter(i=>Z.filter==='alle'||Z.rang[i]===Z.filter);
   const zeig=liste.slice(0,Z.zeig);
+  const schonBei=new Map();
+  for(const k of Object.keys(Z.zu)) for(const id of Z.zu[k]||[]) schonBei.set(id,(schonBei.get(id)||0)+1);
   const opt=i=>{
     const k=Z.kand[i]||[], drin=(Z.zu[i]||[]);
-    return `<option value="">— keine —</option>`+k.map(c=>
-      `<option value="${c.id}" ${drin.includes(c.id)?'selected':''}>${esc(c.sku)} · ${DDE(c.d)} · ${CHF(c.price)}${c.person?' · '+esc(c.person):''}${c.warum.length?' · '+esc(c.warum[0]):''}</option>`).join('');
+    return `<option value="">— keine —</option>`+k.map(c=>{
+      const n2=(schonBei.get(c.id)||0)-(drin.includes(c.id)?1:0);
+      return `<option value="${c.id}" ${drin.includes(c.id)?'selected':''}>${esc(c.sku)} · ${DDE(c.d)} · ${CHF(c.price)}${c.person?' · '+esc(c.person):''}${n2?` · schon bei ${n2} ${n2===1?'Verkauf':'Verkäufen'}`:(c.warum.length?' · '+esc(c.warum[0]):'')}</option>`;
+    }).join('');
   };
   const zeile=i=>{
     const v=Z.verk[i], ids=Z.zu[i]||[], r=Z.rang[i]||'offen';
