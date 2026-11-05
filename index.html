@@ -1553,6 +1553,204 @@ async function rcUebernehmen(){
   if(!rest.length) go('warenausgang'); else draw();
 }
 
+/* ---------- Ricardo-Rechnungen als PDF lesen ---------- */
+// Seit Oktober 2026 gibt Ricardo die Gebühren nur noch als Rechnung im PDF heraus.
+// Darin steht sogar mehr als in der alten Transaktionsliste: je Position die Art
+// der Gebühr, die Auktionsnummer, der Verkaufspreis, der Betrag, ein allfälliger
+// Abzug, dazu Artikelnummer und Verkaufsdatum. Ein Verkaufsbericht braucht es
+// dafür nicht mehr.
+//
+// Ein PDF ist eine Folge nummerierter Objekte. Der sichtbare Text steht in
+// zusammengepressten Streams als Folge von Zeichennummern einer Teilschrift;
+// welche Nummer welcher Buchstabe ist, steht in der /ToUnicode-Tabelle der
+// Schrift. Hier wird nur so viel davon gelesen, wie es für die Rechnung braucht.
+
+// Bytes als Zeichenkette, ein Byte = ein Zeichen. So lassen sich Positionen
+// mit regulären Ausdrücken suchen und danach wieder als Bytes herausschneiden.
+function pdfStr(u8){
+  let s='';
+  for(let i=0;i<u8.length;i+=8192) s+=String.fromCharCode.apply(null,u8.subarray(i,i+8192));
+  return s;
+}
+async function pdfInflate(u8){
+  if(typeof DecompressionStream!=='function') throw new Error('Dieser Browser kann PDF-Dateien nicht auspacken');
+  // Hinter den Daten steht oft noch ein Zeilenumbruch – der stört beim Auspacken.
+  let end=u8.length;
+  while(end>0&&(u8[end-1]===10||u8[end-1]===13||u8[end-1]===32||u8[end-1]===0)) end--;
+  const roh=u8.subarray(0,end);
+  const lauf=async (art,von)=>{
+    const ds=new DecompressionStream(art);
+    const r=new Response(new Blob([roh.subarray(von)]).stream().pipeThrough(ds));
+    return new Uint8Array(await r.arrayBuffer());
+  };
+  try{ return await lauf('deflate',0); }
+  catch(e){ return await lauf('deflate-raw',2); }   // ohne zlib-Kopf
+}
+// Zeichennummer -> Buchstabe, aus einer /ToUnicode-Tabelle.
+function pdfCMap(txt){
+  const m=new Map();
+  const hexs=h=>{ let s=''; for(let i=0;i+3<h.length;i+=4) s+=String.fromCharCode(parseInt(h.substr(i,4),16)); return s; };
+  for(const blk of txt.match(/beginbfchar[\s\S]*?endbfchar/g)||[])
+    for(const p of blk.match(/<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>/g)||[]){
+      const g=/<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>/.exec(p);
+      m.set(parseInt(g[1],16),hexs(g[2]));
+    }
+  for(const blk of txt.match(/beginbfrange[\s\S]*?endbfrange/g)||[])
+    for(const p of blk.match(/<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>/g)||[]){
+      const g=/<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>/.exec(p);
+      const lo=parseInt(g[1],16), hi=parseInt(g[2],16), b=hexs(g[3]);
+      if(hi-lo>0xffff||!b) continue;
+      for(let i=lo;i<=hi;i++) m.set(i,b.slice(0,-1)+String.fromCharCode(b.charCodeAt(b.length-1)+i-lo));
+    }
+  return m;
+}
+// Alle Textstücke einer Seite mit ihrer Lage: [{y,x,t}, …]
+function pdfStuecke(inhalt,fonts,res){
+  const items=[]; let x=0,y=0,cm=null;
+  const TOK=/\/([A-Za-z0-9#]+)\s+[\d.]+\s+Tf|BT\b|([-\d.]+)\s+([-\d.]+)\s+T[dD]\b|([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+Tm\b|\[([\s\S]*?)\]\s*TJ\b|(\((?:[^()\\]|\\[\s\S])*\)|<[0-9A-Fa-f\s]*>)\s*Tj\b/g;
+  const STR=/\((?:[^()\\]|\\[\s\S])*\)|<[0-9A-Fa-f\s]*>/g;
+  let m;
+  while((m=TOK.exec(inhalt))){
+    if(m[0]==='BT'){ x=0; y=0; continue; }
+    if(m[1]!=null){ cm=fonts.get(res[m[1]])||null; continue; }
+    if(m[2]!=null){ x+=parseFloat(m[2]); y+=parseFloat(m[3]); continue; }
+    if(m[4]!=null){ x=parseFloat(m[8]); y=parseFloat(m[9]); continue; }
+    const body=m[10]!=null?m[10]:m[11];
+    if(body==null) continue;
+    let t='';
+    for(const lit of body.match(STR)||[]){
+      if(lit[0]==='<'){
+        const h=lit.slice(1,-1).replace(/\s/g,'');
+        for(let i=0;i+3<h.length;i+=4){ const c=parseInt(h.substr(i,4),16); t+=cm?(cm.get(c)||''):String.fromCharCode(c); }
+      }else{
+        const b=lit.slice(1,-1).replace(/\\([()\\])/g,'$1');
+        if(cm){ for(let i=0;i+1<b.length;i+=2) t+=cm.get(b.charCodeAt(i)<<8|b.charCodeAt(i+1))||''; }
+        else t+=b;
+      }
+    }
+    if(t.trim()) items.push({y:Math.round(y*10)/10,x:Math.round(x*10)/10,t});
+  }
+  return items;
+}
+// Die Seiten eines PDF als Textstücke.
+async function pdfSeiten(u8){
+  const s=pdfStr(u8);
+  const objs=new Map(), offs=new Map();
+  const RE=/(\d+)\s+0\s+obj\b/g; let m;
+  while((m=RE.exec(s))){
+    const e=s.indexOf('endobj',m.index);
+    objs.set(+m[1],s.slice(m.index+m[0].length,e<0?s.length:e));
+    offs.set(+m[1],m.index+m[0].length);
+  }
+  const strom=async n=>{
+    const b=objs.get(n); if(b==null) return '';
+    const m2=/stream\r?\n/.exec(b); if(!m2) return '';
+    const von=offs.get(n)+m2.index+m2[0].length;
+    let bis=s.indexOf('endstream',von); if(bis<0) bis=s.length;
+    const roh=u8.subarray(von,bis);
+    if(!/\/FlateDecode/.test(b.slice(0,m2.index))) return pdfStr(roh);
+    try{ return pdfStr(await pdfInflate(roh)); }catch(e){ return ''; }
+  };
+  const fonts=new Map();
+  for(const [n,b] of objs){
+    const mu=/\/ToUnicode\s+(\d+)\s+0\s+R/.exec(b);
+    if(mu){ const t=await strom(+mu[1]); if(t) fonts.set(n,pdfCMap(t)); }
+  }
+  const seiten=[];
+  for(const [n,b] of objs){
+    if(!/\/Type\s*\/Page\b/.test(b)) continue;
+    const res={}; const RF=/\/([A-Za-z0-9#]+)\s+(\d+)\s+0\s+R/g; let f;
+    while((f=RF.exec(b))) res[f[1]]=+f[2];
+    let cont=[];
+    const mc=/\/Contents\s+(\d+)\s+0\s+R/.exec(b);
+    if(mc) cont=[+mc[1]];
+    else{ const ma=/\/Contents\s*\[([^\]]*)\]/.exec(b);
+      if(ma) cont=(ma[1].match(/\d+(?=\s+0\s+R)/g)||[]).map(Number); }
+    let inhalt=''; for(const c of cont) inhalt+=await strom(c);
+    if(inhalt) seiten.push(pdfStuecke(inhalt,fonts,res));
+  }
+  return seiten;
+}
+// Aus den Textstücken die Positionen der Rechnung lesen.
+// Spalten: Pos | Beschreibung | Auktion | Preis | Betrag | Total | Mwst
+// Darunter je Position eine zweite Zeile: Titel, Artikelnummer, Datum, Abzug.
+const RC_ZAHL=/^-?[\d']+(\.\d+)?$/;
+const rcZahl=t=>parseFloat(String(t).replace(/'/g,''));
+function pdfRechnung(seiten){
+  const KOPF=['Pos','Beschreibung','Auktion','Preis','Betrag','Total','Mwst'];
+  let xs=null;
+  for(const it of seiten){
+    const k={};
+    for(const o of it) if(KOPF.includes(o.t)&&k[o.t]==null) k[o.t]=o.x;
+    if(KOPF.every(h=>k[h]!=null)){ xs=KOPF.map(h=>k[h]); break; }
+  }
+  if(!xs) return null;
+  const grenzen=xs.slice(0,-1).map((v,i)=>(v+xs[i+1])/2);
+  const spalte=x=>{ for(let i=0;i<grenzen.length;i++) if(x<grenzen[i]) return KOPF[i]; return 'Mwst'; };
+  const pos=[]; let cur=null;
+  for(const it of seiten){
+    const zeilen=new Map();
+    for(const o of it){ const k=o.y.toFixed(1); if(!zeilen.has(k)) zeilen.set(k,[]); zeilen.get(k).push(o); }
+    for(const y of [...zeilen.keys()].sort((a,b)=>b-a)){
+      const z={};
+      for(const o of zeilen.get(y).sort((a,b)=>a.x-b.x)){ const c=spalte(o.x); z[c]=(z[c]?z[c]+' ':'')+o.t; }
+      const besch=(z.Beschreibung||'').trim(), auk=(z.Auktion||'').trim(),
+            pr=(z.Preis||'').trim().split(' ')[0], be=(z.Betrag||'').trim().split(' ')[0],
+            mw=(z.Mwst||'').trim().split(' ')[0];
+      if(besch&&/^\d{6,10}$/.test(auk)&&RC_ZAHL.test(pr)&&RC_ZAHL.test(be)&&/^\d{1,3}$/.test(mw)){
+        cur={art:besch,auktion:auk,preis:rcZahl(pr),betrag:rcZahl(be),abzug:0};
+        continue;
+      }
+      const ma=/(\d{9,12})\s*$/.exec(auk);
+      if(cur&&ma&&/^\d{2}\.\d{2}\.\d{4}$/.test(pr)){
+        cur.aid=ma[1];
+        cur.d=pr.slice(6)+'-'+pr.slice(3,5)+'-'+pr.slice(0,2);
+        if(RC_ZAHL.test(be)) cur.abzug=rcZahl(be);
+        cur.titel=(besch+' '+auk.slice(0,ma.index)).trim();
+        cur.total=+(cur.betrag+cur.abzug).toFixed(2);
+        pos.push(cur); cur=null;
+      }
+    }
+  }
+  return pos;
+}
+// Mehrwertsteuer-Positionen heben sich selbst auf (Betrag und Abzug gleich
+// gross), die bleiben aussen vor. Alles andere ist entweder Verkaufsgebühr
+// oder eine über Ricardo gekaufte Versandetikette.
+const RC_PORTO=/Versandetikette|Versandmarke|Paketetikette/i;
+const RC_MWST=/Mehrwertsteuer|MWST/i;
+async function fxAddPdf(u8,name){
+  const seiten=await pdfSeiten(u8);
+  const pos=pdfRechnung(seiten);
+  if(!pos||!pos.length) throw new Error('In dieser PDF-Datei steht keine Ricardo-Gebührenaufstellung');
+  const S=fxState;
+  S.geb=S.geb||new Map(); S.por=S.por||new Map(); S.sales=S.sales||new Map();
+  S.gesehen=S.gesehen||new Set();
+  let n=0;
+  for(const p of pos){
+    if(RC_MWST.test(p.art)) continue;
+    // Dieselbe Rechnung zweimal gewaehlt: jede Position zaehlt nur einmal.
+    const schluessel=p.auktion+'|'+p.art+'|'+p.betrag+'|'+p.abzug;
+    if(S.gesehen.has(schluessel)) continue;
+    S.gesehen.add(schluessel);
+    const ziel=RC_PORTO.test(p.art)?S.por:S.geb;
+    ziel.set(p.aid,+((ziel.get(p.aid)||0)+p.total).toFixed(2));
+    // Die Rechnung kennt Datum und Preis des Verkaufs – ein Verkaufsbericht
+    // ist darum nicht nötig.
+    const l=S.sales.get(p.aid)||[];
+    if(!l.some(v=>v.bestellung===p.auktion))
+      l.push({artikel:p.aid,bestellung:p.auktion,titel:p.titel||'',d:p.d,
+        preis:Math.abs(p.preis),versand:0,kaeufer:''});
+    S.sales.set(p.aid,l);
+    if(!S.von||p.d<S.von) S.von=p.d;
+    if(!S.bis||p.d>S.bis) S.bis=p.d;
+    n++;
+  }
+  if(n&&!S.dateien.includes(name)) S.dateien.push(name);
+  S.zahl.pdf+=n;
+  return n;
+}
+
 /* ---------- Ricardo-Gebühren abgleichen ---------- */
 // Der Verkaufsbericht enthält keine Gebühren – die Transaktionsliste schon,
 // aber nur mit Artikelnummer, ohne Datum und Preis. Darum braucht der Abgleich
@@ -1560,7 +1758,8 @@ async function rcUebernehmen(){
 // Ricardo rechnet nicht mit einem festen Prozentsatz (Rundung auf 5 Rappen,
 // zeitweise Rabattaktionen, andere Sätze für Spielwaren) – deshalb werden die
 // echten Beträge übernommen und nicht gerechnet.
-const fxState={geb:null,por:null,sales:null,dateien:[],plan:null,porto:false,aus:{},alle:false};
+const fxState={geb:null,por:null,sales:null,dateien:[],plan:null,porto:false,aus:{},alle:false,
+  zahl:{pdf:0,tx:0,vk:0}};
 
 // Eine CSV-Zeile mit Komma als Trenner, Anführungszeichen beachtet.
 function csvZeile(l){
@@ -1636,6 +1835,9 @@ function fxPlan(){
   let ohneZeile=0, ohneZeileB=0, ohneBericht=0, ohneBerichtB=0, mehrdeutig=0;
   for(const aid of new Set([...geb.keys(),...por.keys()])){
     const vk=sales.get(aid), gSum=r2(geb.get(aid)||0), pSum=r2(por.get(aid)||0);
+    // Steht zu einem Artikel nur das Porto auf der Abrechnung (die Gebuehr lief
+    // ueber eine fruehere Rechnung), darf die Gebuehr nicht auf null fallen.
+    const hatG=geb.has(aid), hatP=por.has(aid);
     if(!vk){ ohneBericht++; ohneBerichtB+=gSum+pSum; continue; }
     let ziele=(perNr.get(aid)||[]).filter(r=>!benutzt.has(r.id)), wie='nummer';
     if(ziele.length){ ziele.forEach(r=>benutzt.add(r.id)); }
@@ -1665,16 +1867,17 @@ function fxPlan(){
     ziele.forEach((r,i)=>{
       const letzte=i===ziele.length-1;
       const q=pGes?num(r.price)/pGes:1/ziele.length;
-      const g=letzte?r2(restG):r2(gSum*q), p=letzte?r2(restP):r2(pSum*q);
-      restG=r2(restG-g); restP=r2(restP-p);
+      let g,p;
+      if(hatG){ g=letzte?r2(restG):r2(gSum*q); restG=r2(restG-g); } else g=num(r.fees);
+      if(hatP){ p=letzte?r2(restP):r2(pSum*q); restP=r2(restP-p); } else p=num(r.porto);
       treffer.push({id:r.id,d:r.d,sku:r.sku||r.set||'',bem:r.bem||'',titel:(vk[0]||{}).titel||'',
         price:num(r.price),geb0:num(r.fees),geb1:g,por0:num(r.porto),por1:p,
-        wie,aid,teil:ziele.length>1,mehrfach:vk.length>1});
+        wie,aid,teil:ziele.length>1,mehrfach:vk.length>1,hatG,hatP});
     });
   }
   treffer.sort((a,b)=>(b.d||'').localeCompare(a.d||''));
   return {treffer,ohneZeile,ohneZeileB,ohneBericht,ohneBerichtB,mehrdeutig,
-    nGeb:geb.size,nPor:por.size};
+    nGeb:geb.size,nPor:por.size,nAid:new Set([...geb.keys(),...por.keys()]).size};
 }
 const FXWIE={nummer:'Ricardo-Nummer',preis:'Datum + Preis',total:'Datum + Preis inkl. Versand',tag:'Datum ±1 Tag'};
 
@@ -1688,23 +1891,28 @@ function viewRcFees(){
       <div><h1>Gebühren abgleichen</h1><p>Die echten Ricardo-Gebühren in deine Ausgänge übernehmen.</p></div>
       <button class="btn ghost" id="fxBack">Zurück</button></div>
     <div class="card"><h2>Dateien auswählen</h2>
-      <div class="cap">Es braucht zwei Sorten, beide bei Ricardo unter <b>Verkaufen</b>:
-        die <b>Transaktionsliste</b> mit den echten Gebühren (Rechnungen → Transaktionen) und die
-        <b>Verkaufsberichte</b> mit Datum und Preis (Verkaufsübersicht → Bericht), einer pro Monat.
-        Die Transaktionsliste kennt nur Artikelnummern – erst die Berichte machen daraus Verkäufe.
-        Du kannst alle Dateien zusammen auswählen; sie bleiben auf dem Gerät.</div>
-      <div class="toolbar" style="margin-top:10px"><button class="btn" id="fxPick">CSV-Dateien auswählen…</button></div>
+      <div class="cap">Alles bei Ricardo unter <b>Verkaufen</b>, und alles bleibt auf dem Gerät.
+        <b>Rechnungen als PDF</b> (Rechnungen → herunterladen) genügen für sich allein: darin stehen
+        Gebühr, Artikelnummer, Datum und Verkaufspreis beieinander. Für ältere Zeiträume gibt es
+        stattdessen die <b>Transaktionsliste</b> als CSV – die kennt nur Artikelnummern und braucht
+        darum zusätzlich die <b>Verkaufsberichte</b> (Verkaufsübersicht → Bericht), einen pro Monat.
+        Du kannst alles zusammen auswählen, auch mehrere Rechnungen auf einmal.</div>
+      <div class="toolbar" style="margin-top:10px"><button class="btn" id="fxPick">Dateien auswählen…</button></div>
       <div class="tbl-wrap" style="margin-top:4px"><table><tbody>
-        <tr><td>Transaktionsliste</td><td class="num">${S.geb
-          ?`<b>${N0(S.geb.size)}</b> Artikel mit Gebühr · ${N0(S.por.size)} mit Porto${S.von?` · ${DDE(S.von)} – ${DDE(S.bis)}`:''}`
-          :'<span class="count">fehlt noch</span>'}</td></tr>
-        <tr><td>Verkaufsberichte</td><td class="num">${nS
-          ?`<b>${N0(nS)}</b> Verkäufe aus ${S.dateien.length} ${S.dateien.length===1?'Datei':'Dateien'}`
-          :'<span class="count">fehlt noch</span>'}</td></tr>
+        <tr><td>Rechnungen (PDF)</td><td class="num">${S.zahl.pdf
+          ?`<b>${N0(S.zahl.pdf)}</b> Positionen`:'<span class="count">keine</span>'}</td></tr>
+        <tr><td>Transaktionsliste (CSV)</td><td class="num">${S.zahl.tx
+          ?`<b>${N0(S.zahl.tx)}</b> Zeilen`:'<span class="count">keine</span>'}</td></tr>
+        <tr><td>Verkaufsberichte (CSV)</td><td class="num">${S.zahl.vk
+          ?`<b>${N0(S.zahl.vk)}</b> Verkäufe`:'<span class="count">keine</span>'}</td></tr>
+        <tr class="sumrow"><td><b>Zusammen</b></td><td class="num">${S.geb
+          ?`<b>${N0(S.geb.size)}</b> Artikel mit Gebühr · ${N0(S.por.size)} mit Porto · <b>${N0(nS)}</b> Verkäufe${S.von?` · ${DDE(S.von)} – ${DDE(S.bis)}`:''}`
+          :'<span class="count">noch nichts gelesen</span>'}</td></tr>
       </tbody></table></div>
       ${S.dateien.length?`<div class="cap">${S.dateien.map(esc).join(' · ')}</div>`:''}
       ${bereit?`<div class="toolbar" style="margin-top:10px"><button class="btn" id="fxRun">Abgleichen</button></div>`
-        :`<p class="chart-hint">Sobald beide Sorten da sind, geht es weiter.</p>`}
+        :`<p class="chart-hint">Es fehlen noch ${!S.geb?'die Gebühren':'die Verkäufe dazu'}.
+          Eine Rechnung als PDF bringt beides mit.</p>`}
     </div>`;
   }
   const p=S.plan, akt=p.treffer.filter(t=>!S.aus[t.id]);
@@ -1734,7 +1942,8 @@ function viewRcFees(){
     </tr>`; };
   return `
   <div class="phead">
-    <div><h1>Gebühren abgleichen</h1><p>${N0(p.treffer.length)} von ${N0(p.nGeb)} Artikeln der Transaktionsliste in deinen Ausgängen gefunden</p></div>
+    <div><h1>Gebühren abgleichen</h1><p>${N0(p.treffer.length)} ${p.treffer.length===1?'Zeile':'Zeilen'} zugeordnet,
+      aus ${N0(p.nAid)} Artikeln der Ricardo-Abrechnung</p></div>
     <div class="expbar"><button class="btn ghost" id="fxBack">Abbrechen</button>
       <button class="btn" id="fxGo" ${akt.length?'':'disabled'}>${N0(akt.length)} übernehmen</button></div></div>
   <div class="kpis kpis-4">
@@ -1743,7 +1952,7 @@ function viewRcFees(){
     <div class="kpi"><span class="lbl">Gebühren gebucht</span><span class="v">${CHF(g0)}</span>
       <span class="sub">wie bisher in deinen Ausgängen</span></div>
     <div class="kpi"><span class="lbl">Gebühren echt</span><span class="v">${CHF(g1)}</span>
-      <span class="sub">laut Ricardo-Transaktionsliste</span></div>
+      <span class="sub">laut Ricardo-Abrechnung</span></div>
     <div class="kpi"><span class="lbl">Differenz</span><span class="v ${dG>0?'neg':'pos'}">${CHF(dG+dP)}</span>
       <span class="sub">${dG+dP<0?'zu viel Aufwand gebucht':'zu wenig Aufwand gebucht'}${S.porto&&dP?` · inkl. ${CHF(dP)} Porto`:''}</span></div>
   </div>
@@ -1781,35 +1990,58 @@ function viewRcFees(){
     ${abw.length>zeig.length?`<div class="toolbar" style="margin-top:8px"><button class="btn ghost sm" id="fxAlle">Alle ${N0(abw.length)} zeigen</button></div>`:''}
   </div>
   <p class="chart-hint">
-    <b>${N0(p.ohneZeile)} Artikel</b> aus der Transaktionsliste ${p.ohneZeile===1?'hat einen Verkauf':'haben einen Verkauf'} im Bericht, aber keine
+    <b>${N0(p.ohneZeile)} Artikel</b> der Abrechnung ${p.ohneZeile===1?'hat einen Verkauf':'haben einen Verkauf'} mit Datum und Preis, aber keine
     passende Zeile in deinen Ausgängen (${CHF(p.ohneZeileB)} Gebühren) – Spielwaren, stornierte Verkäufe, die du
     gelöscht hast, oder Zeilen, deren Betrag anders erfasst ist.
-    <b>${N0(p.ohneBericht)} Artikel</b> ${p.ohneBericht===1?'hat':'haben'} gar keinen Verkaufsbericht dabei (${CHF(p.ohneBerichtB)}) – das sind
-    Verkäufe aus Monaten, deren Bericht fehlt. Beide Gruppen bleiben unverändert.
+    <b>${N0(p.ohneBericht)} Artikel</b> ${p.ohneBericht===1?'hat':'haben'} weder Datum noch Preis dabei (${CHF(p.ohneBerichtB)}) – das
+    passiert nur bei der Transaktionsliste, wenn der Verkaufsbericht des Monats fehlt. Beide Gruppen bleiben unverändert.
     Ricardo rechnet nicht mit einem festen Satz: 10 % werden auf 5 Rappen abgerundet, Spielwaren kosten 12 %,
-    und in Aktionswochen war es die Hälfte – darum werden hier die echten Beträge eingesetzt statt gerechnet.</p>`;
+    und in Aktionswochen war es die Hälfte – darum werden hier die echten Beträge eingesetzt statt gerechnet.
+    Aus einer Rechnung wird der <b>Total</b> je Position übernommen, also nach Abzügen; Mehrwertsteuer-Positionen
+    bleiben aussen vor, weil sie gleich wieder gutgeschrieben werden.</p>`;
 }
 function wireRcFees(){
   const S=fxState;
   const zurueck=()=>{ S.plan=null; S.aus={}; S.alle=false; go('warenausgang'); };
   const b=$('#fxBack'); if(b)b.onclick=zurueck;
   const pick=$('#fxPick'); if(pick)pick.onclick=()=>{
-    const inp=document.createElement('input'); inp.type='file'; inp.accept='.csv,text/csv'; inp.multiple=true;
+    const inp=document.createElement('input'); inp.type='file';
+    inp.accept='.csv,.pdf,text/csv,application/pdf'; inp.multiple=true;
     inp.onchange=async()=>{
-      let nT=0,nV=0,fehler=[];
+      let nP=0,nT=0,nV=0,fehler=[];
       for(const f of [...inp.files]){
-        let text=''; try{ text=await f.text(); }catch(e){ fehler.push(f.name); continue; }
-        const kopf=(text.replace(/^﻿/,'').split(/\r?\n/)[0]||'');
         try{
-          if(/transaction_type/.test(kopf)){ const r=fxParseTx(text);
-            S.geb=r.geb; S.por=r.por; S.von=r.von; S.bis=r.bis; nT++; }
-          else if(/Article ID/i.test(kopf)){ nV+=fxAddSales(rcParse(text),f.name); }
+          if(/\.pdf$/i.test(f.name)||f.type==='application/pdf'){
+            const u8=new Uint8Array(await f.arrayBuffer());
+            if(pdfStr(u8.subarray(0,5))!=='%PDF-') throw new Error('kein PDF');
+            nP+=await fxAddPdf(u8,f.name);
+            continue;
+          }
+          const text=await f.text();
+          const kopf=(text.replace(/^﻿/,'').split(/\r?\n/)[0]||'');
+          if(/transaction_type/.test(kopf)){
+            const r=fxParseTx(text);
+            // Rechnungen und Transaktionsliste koennen sich ergaenzen.
+            S.geb=S.geb||new Map(); S.por=S.por||new Map();
+            for(const [a,v] of r.geb) S.geb.set(a,+((S.geb.get(a)||0)+v).toFixed(2));
+            for(const [a,v] of r.por) S.por.set(a,+((S.por.get(a)||0)+v).toFixed(2));
+            if(!S.von||(r.von&&r.von<S.von)) S.von=r.von;
+            if(!S.bis||(r.bis&&r.bis>S.bis)) S.bis=r.bis;
+            S.zahl.tx+=r.nG+r.nP; nT++;
+            if(!S.dateien.includes(f.name)) S.dateien.push(f.name);
+          }
+          else if(/Article ID/i.test(kopf)) nV+=fxAddSales(rcParse(text),f.name);
           else fehler.push(f.name);
         }catch(e){ fehler.push(f.name); }
       }
+      S.zahl.vk+=nV;
       draw();
-      toast(fehler.length?`${fehler.length} Datei(en) nicht erkannt`
-        :`${nT?'Transaktionsliste · ':''}${nV} Verkäufe gelesen`);
+      const teile=[];
+      if(nP) teile.push(nP+' Rechnungspositionen');
+      if(nT) teile.push('Transaktionsliste');
+      if(nV) teile.push(nV+' Verkäufe');
+      toast(fehler.length?`${fehler.length===1?'Eine Datei':fehler.length+' Dateien'} nicht erkannt`
+        :(teile.join(' · ')||'Nichts gelesen'));
     };
     inp.click();
   };
@@ -1833,7 +2065,7 @@ async function fxUebernehmen(){
   for(const t of akt){
     const r=store.warenausgang.find(x=>x.id===t.id); if(!r) continue;
     const g0=num(r.fees), p0=num(r.porto);
-    const g1=t.geb1, p1=(S.porto&&t.por1>0)?t.por1:p0;
+    const g1=t.hatG?t.geb1:g0, p1=(S.porto&&t.hatP)?t.por1:p0;
     // Netto mitführen: wo es der Formel entspricht, neu rechnen – sonst nur
     // um die Differenz verschieben, damit eine Handeingabe nicht verschwindet.
     const formel=r2(num(r.price)+num(r.cust)-g0-p0);
