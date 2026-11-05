@@ -155,6 +155,7 @@ main{padding:0;min-width:0}
 .card-row.even{grid-template-columns:1fr 1fr}
 tr.sumrow td{border-top:1px solid var(--line);background:var(--surface-2)}
 .expbar{display:flex;gap:6px;align-items:center}
+.skuhint{display:block;margin-top:3px;font-size:11.5px}
 .legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--muted);margin-top:6px}
 .legend span{display:inline-flex;align-items:center;gap:6px}
 .swatch{width:11px;height:11px;border-radius:3px;flex:none}
@@ -497,7 +498,10 @@ const PCT=n=>((Number(n)||0)*100).toLocaleString('de-CH',{minimumFractionDigits:
 const DDE=d=>{ if(!d)return'—'; const p=String(d).slice(0,10).split('-'); return p.length===3?`${p[2]}.${p[1]}.${p[0]}`:d; };
 const YM=d=>String(d||'').slice(0,7);
 const monthName=ym=>{ const [y,m]=ym.split('-'); return ['Jan','Feb','Mär','Apr','Mai','Jun','Jul','Aug','Sep','Okt','Nov','Dez'][+m-1]+' '+y.slice(2); };
-const num=v=>{ const n=parseFloat(String(v).replace(',','.')); return isFinite(n)?n:0; };
+// Hochkomma und Leerzeichen sind in der Schweiz uebliche Tausendertrenner und
+// landen beim Tippen schnell im Feld; ohne sie zu entfernen wuerde aus
+// 1'234.50 beim Einlesen eine 1.
+const num=v=>{ const n=parseFloat(String(v).replace(/[\u2019'\s\u00a0]/g,'').replace(',','.')); return isFinite(n)?n:0; };
 const roundRappen=v=>Math.round(v/0.05)*0.05;   // Schweizer Rundung auf 5 Rappen
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
@@ -2149,7 +2153,12 @@ const FORMS={
 // Journale mit Ware (Menge x Stückpreis + Versand = Brutto) – Preorders rechnen wie Eingänge
 const BUYGOODS=['wareneingang','preorder'];
 let editing=null, pendingFile=null, pendingRemove=false;
-function openForm(L,row){
+// Was beim „Anlegen & nächster“ stehen bleibt: alles, was sich innerhalb einer
+// Bestellung oder eines Verkaufstags ohnehin wiederholt. Der Käufer wechselt,
+// der Verkäufer meist nicht.
+const KEEP={wareneingang:['d','cat','form','shop','person'],preorder:['d','cat','form','shop','person'],
+  warenausgang:['d','cat','form','shop'],laufende_kosten:['d','cat','shop']};
+function openForm(L,row,prefill){
   editing={L,row,oldYm:row?row._ym:null,id:row?row.id:uid()};
   pendingFile=null; pendingRemove=false;
   const isNew=!row;
@@ -2166,7 +2175,10 @@ function openForm(L,row){
   const kostcatAll=[...new Set([...KOST_KAT,...rows('laufende_kosten').map(r=>r.cat).filter(Boolean)])].sort((a,b)=>a.localeCompare(b,'de'));
   const lists={sku:skuAll,cat:catAll,form:formAll,shop:shopAll,kostcat:kostcatAll};
 
-  const val=k=>row?row[k]??'':(k==='d'?new Date().toISOString().slice(0,10):(k==='qty'?1:''));
+  const vor=prefill||null;
+  const val=k=>row?row[k]??''
+    :(vor&&vor[k]!=null&&vor[k]!==''?vor[k]
+    :(k==='d'?new Date().toISOString().slice(0,10):(k==='qty'?1:'')));
   const fields=FORMS[L].map(([k,lbl,type])=>{
     let input;
     if(type==='date')input=`<input type="date" name="${k}" value="${esc(val(k))}">`;
@@ -2190,18 +2202,35 @@ function openForm(L,row){
   </form>`;
   $('#panelFoot').innerHTML=`
     <button class="btn ghost" id="cancelBtn" type="button">Abbrechen</button>
+    ${isNew?`<button class="btn ghost" id="saveNextBtn" type="button" title="Anlegen und gleich den nächsten erfassen (${navigator.platform.startsWith('Mac')?'⌘':'Strg'}+Enter)">Anlegen &amp; nächster</button>`:''}
     <button class="btn" id="saveBtn" type="button">${isNew?'Anlegen':'Speichern'}</button>`;
   renderPdfBox();
 
   const form=$('#entryForm');
   // smart autofill from SKU
   const skuIn=form.querySelector('[name=sku]');
-  if(skuIn)skuIn.onchange=()=>{
-    const hit=[...rows('warenausgang'),...rows('wareneingang'),...rows('preorder')].filter(r=>r.sku===skuIn.value)
+  const skuFill=()=>{
+    const alle=[...rows('warenausgang'),...rows('wareneingang'),...rows('preorder')];
+    const hit=alle.filter(r=>r.sku===skuIn.value).sort((a,b)=>(b.d||'').localeCompare(a.d||''))[0];
+    if(!hit) return;
+    ['cat','form','set'].forEach(k=>{ const el=form.querySelector(`[name=${k}]`);
+      if(el&&!el.value)el.value=hit[k]||''; });
+    // Preis aus dem letzten gleichartigen Eintrag als Vorschlag – nur in ein leeres
+    // Feld, und nur aus demselben Ledger: ein Verkaufspreis taugt nicht als Einkauf.
+    const gleich=rows(L).filter(r=>r.sku===skuIn.value&&(!row||r.id!==row.id))
       .sort((a,b)=>(b.d||'').localeCompare(a.d||''))[0];
-    if(hit){ ['cat','form','set'].forEach(k=>{ const el=form.querySelector(`[name=${k}]`);
-      if(el&&!el.value)el.value=hit[k]||''; }); updateCalc(); }
+    if(gleich){
+      const pk=L==='warenausgang'?'price':'ek';
+      const el=form.querySelector(`[name=${pk}]`);
+      if(el&&!el.value&&num(gleich[pk])){ el.value=num(gleich[pk]).toFixed(2);
+        const fg=el.closest('.fg'); if(fg&&!fg.querySelector('.skuhint'))
+          fg.insertAdjacentHTML('beforeend',`<span class="skuhint count">zuletzt ${DDE(gleich.d)}</span>`); }
+    }
+    updateCalc();
   };
+  if(skuIn){ skuIn.onchange=skuFill;
+    // Beim Klick auf einen Vorschlag feuert kein change in allen Browsern.
+    skuIn.oninput=()=>{ if(skuIn.value&&skuIn.list&&[...skuIn.list.options].some(o=>o.value===skuIn.value)) skuFill(); }; }
   let feesTouched=!isNew; // bei bestehenden Einträgen nichts automatisch überschreiben
   let netTouched=false;   // Netto folgt der Formel, bis man selbst reintippt
   // Eingänge: EK Netto ist ein Stückpreis. Standardmässig treiben Menge/EK/Versand
@@ -2304,7 +2333,10 @@ function openForm(L,row){
   }
 
   $('#cancelBtn').onclick=closeForm;
-  $('#saveBtn').onclick=submitForm;
+  $('#saveBtn').onclick=()=>submitForm(false);
+  const sn=$('#saveNextBtn'); if(sn)sn.onclick=()=>submitForm(true);
+  // Tastatur: Cmd/Strg+Enter legt an und oeffnet gleich den naechsten.
+  form.onkeydown=e=>{ if((e.metaKey||e.ctrlKey)&&e.key==='Enter'){ e.preventDefault(); submitForm(isNew); } };
   openPanel();
 }
 function renderPdfBox(){
@@ -2345,7 +2377,7 @@ function renderPdfBox(){
     finally{ vw.disabled=false; vw.textContent='Ansehen'; }
   };
 }
-async function submitForm(){
+async function submitForm(weiter){
   const {L,row,oldYm,id}=editing;
   const form=$('#entryForm'); const fd=new FormData(form);
   const rec=row?{...row}:{id};
@@ -2365,8 +2397,20 @@ async function submitForm(){
     if(pendingRemove && rec.pdf){ await deleteReceipt(L,rec.id); delete rec.pdf; }
     if(pendingFile){ await uploadReceipt(L,rec.id,pendingFile);
       rec.pdf={name:pendingFile.name,size:pendingFile.size,at:new Date().toISOString()}; }
-    await saveRow(L,rec,oldYm); toast(row?'Gespeichert':'Eintrag angelegt'); closeForm();
+    await saveRow(L,rec,oldYm);
     if(!row) page=0;   // neuer Eintrag: erste Seite zeigen …
+    if(weiter&&!row){
+      // Panel bleibt offen: nur das Wiederkehrende bleibt stehen, der Rest ist leer.
+      // Oben anfangen und in die SKU springen, damit niemand erst scrollen muss.
+      const keep={}; for(const k of (KEEP[L]||[])) keep[k]=rec[k];
+      toast('Angelegt – nächster Eintrag'); draw();
+      openForm(L,null,keep);
+      const b=$('#panelBody'); if(b)b.scrollTop=0;
+      const first=$('#entryForm [name=sku]')||$('#entryForm [name=desc]');
+      if(first)first.focus();
+      return;
+    }
+    toast(row?'Gespeichert':'Eintrag angelegt'); closeForm();
     draw();
     if(!row){ const reduced=matchMedia('(prefers-reduced-motion: reduce)').matches;
       window.scrollTo({top:0,behavior:reduced?'auto':'smooth'}); }  // … und dorthin scrollen
