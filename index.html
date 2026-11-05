@@ -1685,11 +1685,13 @@ function viewRcZuord(){
     <div><h1>Verkäufe zuordnen</h1><p>Artikel- und Auktionsnummer in deine bestehenden Ausgänge nachtragen.</p></div>
     <button class="btn ghost" id="zuBack">Zurück</button></div>
   <div class="card"><h2>Verkäufe einlesen</h2>
-    <div class="cap">Die <b>Verkaufsberichte</b> von Ricardo (Verkaufen → Verkaufsübersicht → Bericht),
-      einen pro Monat – oder die <b>Rechnungen als PDF</b>. Beide nennen zu jedem Verkauf die Artikel-
-      und die Auktionsnummer. Die App schlägt dir dann zu jedem Verkauf die passende Zeile vor; was
-      nicht eindeutig ist, gehst du selbst durch. Die Dateien bleiben auf dem Gerät.</div>
-    <div class="toolbar" style="margin-top:10px"><button class="btn" id="zuPick">Dateien auswählen…</button></div>
+    <div class="cap">Die <b>Verkaufsberichte</b> als CSV (Verkaufen → Verkaufsübersicht → Bericht
+      herunterladen), einen pro Monat. Darin steht zu jedem Verkauf die Artikel- und die
+      Auktionsnummer. Du kannst alle Monate zusammen auswählen; die App schlägt dir dann zu jedem
+      Verkauf die passende Zeile vor, und was nicht eindeutig ist, gehst du selbst durch.
+      Die Rechnungen als PDF gehören nicht hierher, die braucht der Gebühren-Abgleich.
+      Die Dateien bleiben auf dem Gerät.</div>
+    <div class="toolbar" style="margin-top:10px"><button class="btn" id="zuPick">Berichte auswählen…</button></div>
   </div>`;
   const n={fertig:0,sicher:0,pruefen:0,offen:0};
   Z.verk.forEach((v,i)=>n[Z.rang[i]||'offen']++);
@@ -1721,7 +1723,7 @@ function viewRcZuord(){
   };
   return `
   <div class="phead">
-    <div><h1>Verkäufe zuordnen</h1><p>${N0(Z.verk.length)} Verkäufe aus ${Z.dateien.length} ${Z.dateien.length===1?'Datei':'Dateien'}</p></div>
+    <div><h1>Verkäufe zuordnen</h1><p>${N0(Z.verk.length)} Verkäufe aus ${Z.dateien.length} ${Z.dateien.length===1?'Bericht':'Berichten'}</p></div>
     <div class="expbar"><button class="btn ghost" id="zuBack">Abbrechen</button>
       <button class="btn" id="zuGo" ${n.sicher+n.pruefen?'':'disabled'}>${N0(Object.keys(Z.zu).filter(i=>Z.rang[i]!=='fertig'&&(Z.zu[i]||[]).length).length)} übernehmen</button></div></div>
   <div class="kpis kpis-4">
@@ -1738,7 +1740,7 @@ function viewRcZuord(){
     <select id="zuFilter">${[['pruefen','Nur zu prüfen'],['offen','Nur ohne Vorschlag'],['sicher','Nur sichere'],['fertig','Nur schon zugeordnete'],['alle','Alle Verkäufe']]
       .map(o=>`<option value="${o[0]}" ${Z.filter===o[0]?'selected':''}>${o[1]} (${N0(o[0]==='alle'?Z.verk.length:n[o[0]])})</option>`).join('')}</select>
     <div class="spacer"></div>
-    <button class="btn ghost sm" id="zuPick2">Weitere Datei…</button>
+    <button class="btn ghost sm" id="zuPick2">Weiterer Bericht…</button>
   </div>
   <div class="rc-liste">${zeig.map(zeile).join('')||'<div class="empty">Nichts in dieser Auswahl.</div>'}</div>
   ${liste.length>zeig.length?`<div class="toolbar" style="margin-top:10px"><button class="btn ghost sm" id="zuMehr">Weitere ${N0(Math.min(60,liste.length-zeig.length))} zeigen (${N0(liste.length-zeig.length)} übrig)</button></div>`:''}
@@ -1753,19 +1755,12 @@ function wireRcZuord(){
   const b=$('#zuBack'); if(b)b.onclick=()=>{ go('warenausgang'); };
   const lies=async()=>{
     const inp=document.createElement('input'); inp.type='file';
-    inp.accept='.csv,.pdf,text/csv,application/pdf'; inp.multiple=true;
+    inp.accept='.csv,text/csv'; inp.multiple=true;
     inp.onchange=async()=>{
-      let n=0, fehler=[];
+      let n=0, fehler=[], pdf=0;
       for(const f of [...inp.files]){
+        if(/\.pdf$/i.test(f.name)||f.type==='application/pdf'){ pdf++; continue; }
         try{
-          if(/\.pdf$/i.test(f.name)||f.type==='application/pdf'){
-            const u8=new Uint8Array(await f.arrayBuffer());
-            if(pdfStr(u8.subarray(0,5))!=='%PDF-') throw new Error('kein PDF');
-            const q=await fxAddPdf(u8,f.name);
-            n+=zuAdd(q.pos.map(p=>({artikel:p.aid,bestellung:p.bestellung,titel:p.titel,
-              d:p.d,preis:p.preis,versand:0,kaeufer:''})),f.name);
-            continue;
-          }
           const text=await f.text();
           if(!/Article ID/i.test(text.split(/\r?\n/)[0]||'')) throw new Error('kein Bericht');
           n+=zuAdd(rcParse(text),f.name);
@@ -1773,7 +1768,9 @@ function wireRcZuord(){
       }
       if(n) zuRechnen();
       draw();
-      toast(fehler.length?`${fehler.length===1?'Eine Datei':fehler.length+' Dateien'} nicht erkannt`:`${n} Verkäufe gelesen`);
+      toast(pdf?'Rechnungen gehören zum Gebühren-Abgleich – hier braucht es die Verkaufsberichte'
+        :(fehler.length?`${fehler.length===1?'Eine Datei':fehler.length+' Dateien'} nicht erkannt`
+        :`${n} Verkäufe gelesen`));
     };
     inp.click();
   };
@@ -2180,10 +2177,11 @@ function viewRcFees(){
       <button class="btn ghost" id="fxBack">Zurück</button></div>
     <div class="card"><h2>Dateien auswählen</h2>
       <div class="cap">Alles bei Ricardo unter <b>Verkaufen</b>, und alles bleibt auf dem Gerät.
-        <b>Rechnungen als PDF</b> (Rechnungen → herunterladen) genügen für sich allein: darin stehen
-        Gebühr, Artikelnummer, Datum und Verkaufspreis beieinander. Für die Zeit davor gibt es
-        stattdessen die <b>Transaktionsliste</b> als CSV – die kennt nur Artikelnummern und braucht
-        darum zusätzlich die <b>Verkaufsberichte</b> (Verkaufsübersicht → Bericht), einen pro Monat.
+        Seit dem 1. Oktober gibt es die Gebühren nur noch als <b>Rechnung im PDF</b>
+        (Rechnungen → herunterladen); die genügt für sich allein, darin stehen Gebühr,
+        Artikelnummer, Datum und Verkaufspreis beieinander. Für die Zeit davor gibt es die
+        <b>Transaktionsliste</b> als CSV – die kennt nur Artikelnummern und braucht darum
+        zusätzlich die <b>Verkaufsberichte</b> (Verkaufsübersicht → Bericht), einen pro Monat.
         Du kannst alles zusammen auswählen; was sich überschneidet, wird nur einmal gezählt.</div>
       <div class="toolbar" style="margin-top:10px"><button class="btn" id="fxPick">Dateien auswählen…</button>
         ${nQ||nS?`<button class="btn ghost sm" id="fxLeer">Alles entfernen</button>`:''}</div>
