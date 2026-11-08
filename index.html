@@ -2952,9 +2952,10 @@ const BUYGOODS=['wareneingang','preorder'];
 let editing=null, pendingFile=null, pendingRemove=false;
 // Was beim „Anlegen & nächster“ stehen bleibt: alles, was sich innerhalb einer
 // Bestellung oder eines Verkaufstags ohnehin wiederholt. Der Käufer wechselt,
-// der Verkäufer meist nicht.
-const KEEP={wareneingang:['d','cat','form','shop','person'],preorder:['d','cat','form','shop','person'],
-  warenausgang:['d','cat','form','shop'],laufende_kosten:['d','cat','shop']};
+// der Verkäufer meist nicht. Artikelform und Set gehören zur SKU, nicht zur
+// Bestellung – die füllt skuFill, sobald die neue SKU steht.
+const KEEP={wareneingang:['d','cat','shop','person'],preorder:['d','cat','shop','person'],
+  warenausgang:['d','cat','shop'],laufende_kosten:['d','cat','shop']};
 function openForm(L,row,prefill){
   editing={L,row,oldYm:row?row._ym:null,id:row?row.id:uid()};
   pendingFile=null; pendingRemove=false;
@@ -3006,12 +3007,21 @@ function openForm(L,row,prefill){
   const form=$('#entryForm');
   // smart autofill from SKU
   const skuIn=form.querySelector('[name=sku]');
+  // Felder, die nicht von Hand stehen: aus dem Vorgänger-Eintrag übernommen oder
+  // selbst aus der SKU gefüllt. Nur die darf ein SKU-Wechsel wieder überschreiben.
+  const autoK=new Set(isNew?['cat','form','set'].filter(k=>vor&&vor[k]):[]);
   const skuFill=()=>{
     const alle=[...rows('warenausgang'),...rows('wareneingang'),...rows('preorder')];
     const hit=alle.filter(r=>r.sku===skuIn.value).sort((a,b)=>(b.d||'').localeCompare(a.d||''))[0];
-    if(!hit) return;
+    if(!hit){ // unbekannte SKU: was automatisch von einer anderen SKU stammt, muss weg
+      ['form','set'].forEach(k=>{ if(!autoK.has(k))return;
+        const el=form.querySelector(`[name=${k}]`); if(el)el.value=''; });
+      return; }
     ['cat','form','set'].forEach(k=>{ const el=form.querySelector(`[name=${k}]`);
-      if(el&&!el.value)el.value=hit[k]||''; });
+      if(!el)return;
+      if(el.value&&!autoK.has(k))return;   // von Hand getippt – bleibt stehen
+      if(!hit[k]&&el.value)return;         // die SKU weiss es auch nicht besser
+      el.value=hit[k]||''; autoK.add(k); });
     // Preis aus dem letzten gleichartigen Eintrag als Vorschlag – nur in ein leeres
     // Feld, und nur aus demselben Ledger: ein Verkaufspreis taugt nicht als Einkauf.
     const gleich=rows(L).filter(r=>r.sku===skuIn.value&&(!row||r.id!==row.id))
@@ -3025,6 +3035,9 @@ function openForm(L,row,prefill){
     }
     updateCalc();
   };
+  // Tippt jemand selbst in Kategorie/Artikelform/Set, gehört das Feld ihm.
+  ['cat','form','set'].forEach(k=>{ const el=form.querySelector(`[name=${k}]`);
+    if(el)el.addEventListener('input',()=>autoK.delete(k)); });
   if(skuIn){ skuIn.onchange=skuFill;
     // Beim Klick auf einen Vorschlag feuert kein change in allen Browsern.
     skuIn.oninput=()=>{ if(skuIn.value&&skuIn.list&&[...skuIn.list.options].some(o=>o.value===skuIn.value)) skuFill(); }; }
