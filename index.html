@@ -174,6 +174,9 @@ tr.sumrow td{border-top:1px solid var(--line);background:var(--surface-2)}
   border-radius:7px;padding:5px 8px;font:inherit;font-size:13px}
 .rc-teil input[data-rc=sku]{flex:1;min-width:170px}
 .rc-anteil{min-width:88px;text-align:right}
+.rc-zeile.rc-dup{opacity:.6}
+.rc-dupnote{margin:-2px 0 7px}
+.rc-dupnote .chk{margin-left:6px}
 .legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--muted);margin-top:6px}
 .legend span{display:inline-flex;align-items:center;gap:6px}
 .swatch{width:11px;height:11px;border-radius:3px;flex:none}
@@ -1431,6 +1434,7 @@ function rcZeile(r){
   }else{
     z.sku=(m.titel[r.titel]||{}).sku||'';
   }
+  z.dup=rcDup(r); z.erneut=false;
   return z;
 }
 // Aufteilung des Verkaufspreises nach Anzahl Booster-Packs je Bestandteil.
@@ -1443,6 +1447,34 @@ function rcSplit(z){
   return z.teile.map((t,i)=>({sku:t.sku,menge:t.menge,
     anteil:gleich?(1/z.teile.length):(gew[i]/summe)}));
 }
+// Steht dieser Verkauf schon in den Ausgaengen? Artikel- und Auktionsnummer sind
+// eindeutig – daran erkennt man eine Zeile, die ein frueherer Import angelegt hat.
+// Zeilen von Hand haben keine Nummern; dort zaehlt Datum + Kaeufer + Betrag, und
+// zwar nur bei Zeilen ohne Nummern, damit zwei echte Verkaeufe desselben Artikels
+// an denselben Kaeufer am selben Tag nicht faelschlich als Dublette gelten.
+const rcNorm=s=>String(s||'').toLowerCase().replace(/\s+/g,'');
+function rcDup(r){
+  const alle=rows('warenausgang');
+  const nr=String(r.artikel||'').trim(), au=String(r.bestellung||'').trim();
+  let tr=nr?alle.filter(x=>nrListe(x.artikel).includes(nr)):[];
+  if(tr.length) return {zeilen:tr,grund:'Artikel-Nr. '+nr};
+  tr=au?alle.filter(x=>nrListe(x.auktion).includes(au)):[];
+  if(tr.length) return {zeilen:tr,grund:'Auktions-Nr. '+au};
+  const k=rcNorm(r.kaeufer); if(!k) return null;
+  const ohneNr=alle.filter(x=>x.d===r.d&&rcNorm(x.person)===k
+    &&!nrListe(x.artikel).length&&!nrListe(x.auktion).length);
+  if(!ohneNr.length) return null;
+  const gleich=ohneNr.filter(x=>Math.abs(num(x.price)-num(r.preis))<0.02);
+  if(gleich.length) return {zeilen:gleich,grund:'gleicher Tag, Käufer und Preis'};
+  const summe=+ohneNr.reduce((a,x)=>a+num(x.price),0).toFixed(2);
+  if(ohneNr.length>1&&Math.abs(summe-num(r.preis))<0.02)
+    return {zeilen:ohneNr,grund:'gleicher Tag und Käufer, Betrag aufgeteilt'};
+  return null;
+}
+// Wird diese Zeile beim Uebernehmen gebucht? Dubletten nur auf ausdrueckliche Ansage.
+const rcNehmen=z=>!rcOffen(z)&&(!z.dup||z.erneut);
+// Uebersprungene Dubletten brauchen keine SKU – sie werden nicht angemahnt.
+const rcMahnen=z=>rcOffen(z)&&!(z.dup&&!z.erneut);
 const rcOffen=z=>z.art==='einzeln'?!z.sku
   :(!z.teile.length||z.teile.some(t=>!t.sku||!t.label||!num(t.b)));
 // Aus einer fertig zugeordneten Zeile die Verkaufsbuchungen machen.
@@ -1491,8 +1523,9 @@ function viewRcImport(){
     <p class="chart-hint">Der Bericht enthält keine Gebühren, darum der Prozentsatz. Das Porto
       weiss Ricardo nicht – das trägst du beim Zuordnen gleich je Verkauf ein.</p></div>`;
 
-  const offen=zs.filter(rcOffen).length;
-  const bereit=zs.length-offen;
+  const offen=zs.filter(rcMahnen).length;
+  const dupp=zs.filter(z=>z.dup&&!z.erneut).length;
+  const bereit=zs.filter(rcNehmen).length;
   const porto=i=>`<span class="count">Porto</span>
       <input type="text" inputmode="decimal" data-rc="porto" data-i="${i}" value="${zs[i].porto||''}"
         placeholder="0.00" style="width:72px;text-align:right" title="Was du der Post bezahlt hast – leer lassen, wenn noch offen">`;
@@ -1500,12 +1533,15 @@ function viewRcImport(){
     const teile=z.art==='einzeln'?null:rcSplit(z);
     const kopf=`<div class="rc-kopf"><span class="mono count">${DDE(z.d)}</span>
       <b>${esc(z.titel)}</b>
-      <span class="count">${CHF(z.preis)}${z.versand?' + '+CHF(z.versand)+' Versand':''} · ${esc(z.kaeufer||'—')}</span></div>`;
-    if(z.art==='einzeln') return `<div class="rc-zeile ${rcOffen(z)?'rc-offen':''}" data-i="${i}">${kopf}
+      <span class="count">${CHF(z.preis)}${z.versand?' + '+CHF(z.versand)+' Versand':''} · ${esc(z.kaeufer||'—')}</span></div>
+      ${z.dup?`<div class="cap rc-dupnote">Steht schon in den Ausgängen (${esc(z.dup.grund)}${z.dup.zeilen[0].sku?', '+esc(z.dup.zeilen[0].sku):''}) –
+        wird übersprungen. <label class="chk"><input type="checkbox" data-rcagain="${i}" ${z.erneut?'checked':''}> trotzdem übernehmen</label></div>`:''}`;
+    const kl=`rc-zeile ${rcMahnen(z)?'rc-offen':''} ${z.dup&&!z.erneut?'rc-dup':''}`;
+    if(z.art==='einzeln') return `<div class="${kl}" data-i="${i}">${kopf}
       <div class="rc-teil"><span class="count">${z.menge}&times;</span>
         <input type="text" list="dl_rcsku" data-rc="sku" data-i="${i}" placeholder="SKU zuordnen…"
           value="${esc(z.sku||'')}" autocomplete="off">${porto(i)}</div></div>`;
-    return `<div class="rc-zeile ${rcOffen(z)?'rc-offen':''}" data-i="${i}">${kopf}
+    return `<div class="${kl}" data-i="${i}">${kopf}
       ${z.art==='unbekannt'?`<div class="cap">Inhalt steht nicht im Titel (${z.offen} Produkte) – bitte eintragen.</div>`:''}
       ${z.teile.map((t,j)=>`<div class="rc-teil">
         <input type="text" inputmode="numeric" data-rc="menge" data-i="${i}" data-j="${j}" value="${t.menge}" style="width:46px" title="Stückzahl">
@@ -1525,6 +1561,8 @@ function viewRcImport(){
       <button class="btn" id="rcGo" ${bereit?'':'disabled'}>${bereit} übernehmen</button></div></div>
   ${offen?`<div class="banner warn"><span><b>${offen} ${offen===1?'Verkauf braucht':'Verkäufe brauchen'} noch eine Zuordnung.</b>
     Ohne SKU stimmt das Lager nicht – diese Zeilen bleiben stehen, die übrigen kannst du schon übernehmen.</span></div>`:''}
+  ${dupp?`<div class="banner"><span><b>${dupp} ${dupp===1?'Verkauf steht':'Verkäufe stehen'} schon in den Ausgängen.</b>
+    ${dupp===1?'Dieser wird':'Diese werden'} übersprungen – ausser du hakst bei der Zeile „trotzdem übernehmen“ an.</span></div>`:''}
   <div class="rc-liste">${zs.map(row).join('')}</div>`;
 }
 function wireRcImport(){
@@ -1551,6 +1589,8 @@ function wireRcImport(){
       rcRefresh(+el.dataset.i);
     };
   }
+  for(const c of $$('[data-rcagain]')) c.onchange=()=>{
+    const i=+c.dataset.rcagain; rcState.zeilen[i].erneut=c.checked; draw(); };
   for(const b of $$('[data-rcadd]')) b.onclick=()=>{
     const z=rcState.zeilen[+b.dataset.rcadd];
     z.teile.push({menge:1,label:'',sku:'',b:0}); draw();
@@ -1565,18 +1605,19 @@ function wireRcImport(){
 function rcRefresh(i){
   const z=rcState.zeilen[i]; if(!z)return;
   const box=document.querySelector(`.rc-zeile[data-i="${i}"]`);
-  if(box) box.classList.toggle('rc-offen',rcOffen(z));
+  if(box) box.classList.toggle('rc-offen',rcMahnen(z));
   if(z.art!=='einzeln'){
     const teile=rcSplit(z);
     for(const s of $$(`.rc-anteil[data-i="${i}"]`)){
       const j=+s.dataset.j; s.textContent=teile[j]?CHF(z.preis*teile[j].anteil):'';
     }
   }
-  const bereit=rcState.zeilen.filter(x=>!rcOffen(x)).length;
+  const bereit=rcState.zeilen.filter(rcNehmen).length;
   const btn=$('#rcGo'); if(btn){ btn.textContent=bereit+' übernehmen'; btn.disabled=!bereit; }
 }
 async function rcUebernehmen(){
-  const fertig=rcState.zeilen.filter(z=>!rcOffen(z));
+  const fertig=rcState.zeilen.filter(rcNehmen);
+  const sprung=rcState.zeilen.filter(z=>z.dup&&!z.erneut).length;
   if(!fertig.length) return;
   const m=rcMaps(); let n=0;
   for(const z of fertig){
@@ -1587,9 +1628,11 @@ async function rcUebernehmen(){
       for(const t of z.teile) m.teil[t.label]={sku:t.sku,b:t.b}; }
   }
   persist();
-  const rest=rcState.zeilen.filter(rcOffen);
+  // Uebersprungene Dubletten sind erledigt; offen bleibt, was noch keine SKU hat.
+  const rest=rcState.zeilen.filter(z=>rcOffen(z)&&!z.dup);
+  rest.forEach(z=>{ z.dup=rcDup(z); });
   rcState.zeilen=rest.length?rest:null;
-  toast(`${n} Verkäufe übernommen${rest.length?', '+rest.length+' offen':''}`);
+  toast(`${n} Verkäufe übernommen${sprung?', '+sprung+' schon gebucht':''}${rest.length?', '+rest.length+' offen':''}`);
   if(!rest.length) go('warenausgang'); else draw();
 }
 
