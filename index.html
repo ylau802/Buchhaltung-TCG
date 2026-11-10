@@ -175,6 +175,12 @@ tr.sumrow td{border-top:1px solid var(--line);background:var(--surface-2)}
 .rc-teil input[data-rc=sku]{flex:1;min-width:170px}
 .rc-anteil{min-width:88px;text-align:right}
 .rc-zeile.rc-dup{opacity:.6}
+.rc-gruppe{border:1px dashed var(--line);border-radius:12px;padding:9px 10px 2px}
+.rc-gruppe .rc-zeile{margin-bottom:7px}
+.rc-gkopf{display:flex;flex-wrap:wrap;gap:8px;align-items:baseline;font-size:13px}
+.rc-gkopf b{font-weight:600}
+.rc-gporto{color:var(--gold)}
+.rc-gruppe>.cap{margin:-2px 0 7px}
 .rc-dupnote{margin:-2px 0 7px}
 .rc-dupnote .chk{margin-left:6px}
 .legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--muted);margin-top:6px}
@@ -1500,13 +1506,40 @@ function rcBuchungen(z,feePct){
   return hin;
 }
 
-const rcState={zeilen:null,datei:'',fee:10};
+const rcState={zeilen:null,datei:'',fee:10,gruppen:[]};
+// Verkaeufe an denselben Kaeufer innerhalb von zwei Tagen gehen meist in einem
+// Paket raus. Sie stehen darum beieinander, mit dem bisher eingetragenen Porto
+// im Kopf – so sieht man ohne Scrollen, ob das Porto schon verrechnet ist.
+const rcTage=(a,b)=>Math.abs((new Date(b)-new Date(a))/86400000);
+function rcGruppen(zs){
+  const nach=new Map();
+  zs.forEach((z,i)=>{ const k=rcNorm(z.kaeufer)||('#'+i);
+    if(!nach.has(k))nach.set(k,[]); nach.get(k).push(i); });
+  const raus=[];
+  for(const idx of nach.values()){
+    idx.sort((a,b)=>String(zs[a].d||'').localeCompare(String(zs[b].d||'')));
+    let lauf=[idx[0]];
+    for(let n=1;n<idx.length;n++){
+      const vor=zs[lauf[lauf.length-1]].d, jetzt=zs[idx[n]].d;
+      if(vor&&jetzt&&rcTage(vor,jetzt)<=2) lauf.push(idx[n]);
+      else { raus.push(lauf); lauf=[idx[n]]; }
+    }
+    raus.push(lauf);
+  }
+  // Reihenfolge der Datei behalten: die Gruppe zuerst, deren erste Zeile zuerst kam.
+  raus.sort((a,b)=>Math.min(...a)-Math.min(...b));
+  return raus;
+}
+const rcGPorto=g=>g.reduce((a,i)=>a+(num(rcState.zeilen[i].porto)||0),0);
 function rcSkuListe(){
   return [...new Set([...rows('warenausgang'),...rows('wareneingang'),...rows('preorder')]
     .map(r=>r.sku).filter(Boolean))].sort();
 }
+const rcGPortoText=g=>{ const p=rcGPorto(g);
+  return p?'· Porto zusammen '+CHF(p):'· noch kein Porto'; };
 function viewRcImport(){
   const zs=rcState.zeilen;
+  rcState.gruppen=zs?rcGruppen(zs):[];
   const dl=`<datalist id="dl_rcsku">${rcSkuListe().map(s=>`<option value="${esc(s)}">`).join('')}</datalist>`;
   if(!zs) return `
   <div class="phead"><div><h1>Ricardo-Import</h1>
@@ -1563,7 +1596,16 @@ function viewRcImport(){
     Ohne SKU stimmt das Lager nicht – diese Zeilen bleiben stehen, die übrigen kannst du schon übernehmen.</span></div>`:''}
   ${dupp?`<div class="banner"><span><b>${dupp} ${dupp===1?'Verkauf steht':'Verkäufe stehen'} schon in den Ausgängen.</b>
     ${dupp===1?'Dieser wird':'Diese werden'} übersprungen – ausser du hakst bei der Zeile „trotzdem übernehmen“ an.</span></div>`:''}
-  <div class="rc-liste">${zs.map(row).join('')}</div>`;
+  <div class="rc-liste">${rcState.gruppen.map((g,gi)=>{
+    if(g.length<2) return row(zs[g[0]],g[0]);
+    const d1=DDE(zs[g[0]].d), d2=DDE(zs[g[g.length-1]].d);
+    return `<div class="rc-gruppe"><div class="rc-gkopf">
+      <b>${esc(zs[g[0]].kaeufer||'—')}</b>
+      <span class="count">${g.length} Verkäufe · ${d1}${d1===d2?'':' – '+d2}</span>
+      <span class="count rc-gporto" data-gporto="${gi}">${rcGPortoText(g)}</span></div>
+      <div class="cap">Geht wahrscheinlich in einem Paket raus – Porto nur bei einer Zeile eintragen.</div>
+      ${g.map(i=>row(zs[i],i)).join('')}</div>`;
+  }).join('')}</div>`;
 }
 function wireRcImport(){
   const back=$('#rcBack'); if(back)back.onclick=()=>{ rcState.zeilen=null; go('warenausgang'); };
@@ -1612,6 +1654,8 @@ function rcRefresh(i){
       const j=+s.dataset.j; s.textContent=teile[j]?CHF(z.preis*teile[j].anteil):'';
     }
   }
+  for(const sp of $$('[data-gporto]')){
+    const g=rcState.gruppen[+sp.dataset.gporto]; if(g) sp.textContent=rcGPortoText(g); }
   const bereit=rcState.zeilen.filter(rcNehmen).length;
   const btn=$('#rcGo'); if(btn){ btn.textContent=bereit+' übernehmen'; btn.disabled=!bereit; }
 }
