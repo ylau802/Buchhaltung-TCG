@@ -1450,7 +1450,12 @@ function rcZeile(r){
     z.teile=bek?bek.map(x=>({menge:x.menge||1,label:x.label||'',sku:x.sku||'',b:num(x.b)||0}))
       :[{menge:1,label:'',sku:'',b:0}];
   }else{
-    z.sku=(m.titel[r.titel]||{}).sku||'';
+    // Von Hand aufgeteilte Titel stehen auch in maps.bundle – beim naechsten
+    // Bericht kommt dieselbe Aufteilung von selbst zurueck.
+    const bek=m.bundle[r.titel];
+    if(bek&&bek.length>1){ z.art='teile'; z.manuell=true;
+      z.teile=bek.map(x=>({menge:x.menge||1,label:x.label||'',sku:x.sku||'',b:num(x.b)||0}));
+    }else z.sku=(m.titel[r.titel]||{}).sku||'';
   }
   z.dup=rcDup(r); z.erneut=false; z.sammel=false;
   return z;
@@ -1494,6 +1499,7 @@ const rcNehmen=z=>!rcOffen(z)&&(!z.dup||z.erneut);
 // Uebersprungene Dubletten brauchen keine SKU – sie werden nicht angemahnt.
 const rcMahnen=z=>rcOffen(z)&&!(z.dup&&!z.erneut);
 const rcOffen=z=>z.art==='einzeln'?!z.sku
+  :z.manuell?(!z.teile.length||z.teile.some(t=>!t.sku))
   :(!z.teile.length||z.teile.some(t=>!t.sku||!t.label||!num(t.b)));
 // Aus einer fertig zugeordneten Zeile die Verkaufsbuchungen machen.
 function rcBuchungen(z,feePct){
@@ -1593,19 +1599,25 @@ function viewRcImport(){
     if(z.art==='einzeln') return `<div class="${kl}" data-i="${i}">${kopf}
       <div class="rc-teil"><span class="count">${z.menge}&times;</span>
         <input type="text" list="dl_rcsku" data-rc="sku" data-i="${i}" placeholder="SKU zuordnen…"
-          value="${esc(z.sku||'')}" autocomplete="off">${porto(i)}</div></div>`;
+          value="${esc(z.sku||'')}" autocomplete="off">${porto(i)}
+        <button class="btn ghost sm" data-rcsplit="${i}" title="Dieser Verkauf enthält mehrere Artikel mit eigener SKU">Aufteilen</button></div></div>`;
     return `<div class="${kl}" data-i="${i}">${kopf}
       ${z.art==='unbekannt'?`<div class="cap">Inhalt steht nicht im Titel (${z.offen} Produkte) – bitte eintragen.</div>`:''}
+      ${z.manuell?`<div class="cap">Von Hand aufgeteilt. Der Anteil steuert, wie sich Preis, Versand und Gebühren
+        verteilen – am einfachsten den Preis je Artikel eintragen. Lässt du ihn überall leer, wird gleichmässig geteilt.</div>`:''}
       ${z.teile.map((t,j)=>`<div class="rc-teil">
         <input type="text" inputmode="numeric" data-rc="menge" data-i="${i}" data-j="${j}" value="${t.menge}" style="width:46px" title="Stückzahl">
         <input type="text" data-rc="label" data-i="${i}" data-j="${j}" value="${esc(t.label)}" placeholder="Bestandteil" style="width:150px">
         <input type="text" list="dl_rcsku" data-rc="sku" data-i="${i}" data-j="${j}" value="${esc(t.sku)}" placeholder="SKU zuordnen…" autocomplete="off">
-        <input type="text" inputmode="numeric" data-rc="b" data-i="${i}" data-j="${j}" value="${t.b||''}" placeholder="Booster" style="width:74px" title="Anzahl Booster-Packs in diesem Bestandteil">
+        <input type="text" inputmode="decimal" data-rc="b" data-i="${i}" data-j="${j}" value="${t.b||''}"
+          placeholder="${z.manuell?'Anteil':'Booster'}" style="width:74px"
+          title="${z.manuell?'Wert dieses Artikels – am einfachsten sein Preis. Leer bei allen: gleichmässig aufteilen.':'Anzahl Booster-Packs in diesem Bestandteil'}">
         <span class="count rc-anteil" data-i="${i}" data-j="${j}">${teile[j]?CHF(z.preis*teile[j].anteil):''}</span>
         <button class="iconbtn" data-rcdel="${i}" data-j="${j}" title="Bestandteil entfernen">&times;</button>
       </div>`).join('')}
       <div class="rc-teil">${porto(i)}<span class="count">auf die Bestandteile verteilt</span></div>
-      <button class="btn ghost sm" data-rcadd="${i}">Bestandteil hinzufügen</button></div>`;
+      <button class="btn ghost sm" data-rcadd="${i}">Bestandteil hinzufügen</button>
+      ${z.manuell?`<button class="btn ghost sm" data-rcein="${i}">Doch ein Artikel</button>`:''}</div>`;
   };
   return `${dl}
   <div class="phead"><div><h1>Ricardo-Import</h1>
@@ -1661,6 +1673,19 @@ function wireRcImport(){
     draw(); };
   for(const c of $$('[data-rcagain]')) c.onchange=()=>{
     const i=+c.dataset.rcagain; rcState.zeilen[i].erneut=c.checked; draw(); };
+  for(const b of $$('[data-rcsplit]')) b.onclick=()=>{
+    const z=rcState.zeilen[+b.dataset.rcsplit];
+    // Titel an " + " trennen gibt die Bestandteile meist schon vor.
+    const st=String(z.titel||'').split(/\s+\+\s+/).map(x=>x.trim()).filter(Boolean);
+    const vor=st.length>1?st:[String(z.titel||'').trim(),''];
+    z.art='teile'; z.manuell=true;
+    z.teile=vor.map(l=>({menge:1,label:l,sku:'',b:0}));
+    draw(); };
+  for(const b of $$('[data-rcein]')) b.onclick=()=>{
+    const z=rcState.zeilen[+b.dataset.rcein];
+    z.art='einzeln'; z.manuell=false;
+    z.sku=(z.teile.find(t=>t.sku)||{}).sku||''; z.teile=[];
+    draw(); };
   for(const b of $$('[data-rcadd]')) b.onclick=()=>{
     const z=rcState.zeilen[+b.dataset.rcadd];
     z.teile.push({menge:1,label:'',sku:'',b:0}); draw();
