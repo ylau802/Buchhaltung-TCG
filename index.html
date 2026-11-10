@@ -244,7 +244,8 @@ td.cell-wrap{white-space:normal;min-width:150px;max-width:280px}
 .chip.c-po{background:none;border-style:dashed;border-color:var(--gold-soft);color:var(--gold-soft)}
 .chip.c-lang{font-weight:600;letter-spacing:.4px}
 tbody tr.po td{color:var(--ink-soft)}
-tr.storno td:not(:last-child){opacity:.5}
+td.sto{color:var(--neg);text-decoration:line-through}
+tr.storno .cell-wrap{color:var(--neg)}
 .rowact{display:flex;gap:4px;opacity:0;transition:opacity .12s}
 tr:hover .rowact{opacity:1}
 .rowact button{border:1px solid var(--line);background:var(--surface);border-radius:6px;
@@ -1249,13 +1250,18 @@ function rowHTML(L,r,cols){
   // data-l: auf dem Handy wird jede Zeile eine Karte, dort steht das Label vor dem Wert.
   // Klasse "e" = leeres Feld, auf dem Handy ausgeblendet statt als „—“ gezeigt.
   const trKl=[r._po?'po':'',r.storno?'storno':''].filter(Boolean).join(' ');
+  const sto=r.storno||null;   // die urspruenglichen Betraege, falls storniert
   return `<tr${trKl?` class="${trKl}"`:''}>${cols.map(([k,lbl,t])=>{
     let v=r[k];
     const a=`data-l="${esc(lbl)}"`, e=v?'':' e';
     if(k==='d')return `<td ${a} class="mono">${DDE(v)}</td>`;
     if(k==='cat')return `<td ${a} class="${e.trim()}"><span class="chip ${r.cat==='Pokémon'?'c-pk':''}${r._po?' c-po':''}">${esc(v||'—')}</span></td>`;
     if(k==='sku')return `<td ${a} class="mono${e}">${esc(v||'—')}</td>`;
-    if(t==='n'){ const nn=num(v);
+    if(t==='n'){
+      // Bei einem Storno zeigt die Tabelle den alten Wert durchgestrichen – gezaehlt
+      // wird trotzdem die 0, die in der Zeile steht.
+      const alt=sto&&(k in sto), nn=num(alt?sto[k]:v);
+      if(alt) return `<td ${a} class="num sto">${(k==='qty'||k==='got')?N0(nn):N2(nn)}</td>`;
       return `<td ${a} class="num${nn?'':' e'}">${(k==='qty'||k==='got')?N0(nn):(nn?N2(nn):'—')}</td>`; }
     if(t==='nr'){
       // Mehrere Nummern je Zeile gibt es bei Sammelkäufen. Zwei stehen da,
