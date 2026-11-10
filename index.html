@@ -244,6 +244,7 @@ td.cell-wrap{white-space:normal;min-width:150px;max-width:280px}
 .chip.c-po{background:none;border-style:dashed;border-color:var(--gold-soft);color:var(--gold-soft)}
 .chip.c-lang{font-weight:600;letter-spacing:.4px}
 tbody tr.po td{color:var(--ink-soft)}
+tr.storno td:not(:last-child){opacity:.5}
 .rowact{display:flex;gap:4px;opacity:0;transition:opacity .12s}
 tr:hover .rowact{opacity:1}
 .rowact button{border:1px solid var(--line);background:var(--surface);border-radius:6px;
@@ -1247,7 +1248,8 @@ function catBreakdown(f){
 function rowHTML(L,r,cols){
   // data-l: auf dem Handy wird jede Zeile eine Karte, dort steht das Label vor dem Wert.
   // Klasse "e" = leeres Feld, auf dem Handy ausgeblendet statt als „—“ gezeigt.
-  return `<tr${r._po?' class="po"':''}>${cols.map(([k,lbl,t])=>{
+  const trKl=[r._po?'po':'',r.storno?'storno':''].filter(Boolean).join(' ');
+  return `<tr${trKl?` class="${trKl}"`:''}>${cols.map(([k,lbl,t])=>{
     let v=r[k];
     const a=`data-l="${esc(lbl)}"`, e=v?'':' e';
     if(k==='d')return `<td ${a} class="mono">${DDE(v)}</td>`;
@@ -1270,6 +1272,7 @@ function rowHTML(L,r,cols){
   <td><div class="rowact">
     ${(L==='preorder'||r._po)?`<button data-got title="Lieferung eingetroffen – in die Eingänge buchen"><svg viewBox="0 0 24 24"><path d="M12 3v9m0 0l-4-4m4 4l4-4M4 14v5a2 2 0 002 2h12a2 2 0 002-2v-5"/></svg></button>`:''}
     ${r.pdf?`<button data-pdf title="Beleg ansehen · ${esc(r.pdf.name)}"><svg viewBox="0 0 24 24"><path d="M6 2h9l5 5v15H6z"/><path d="M15 2v5h5"/></svg></button>`:''}
+    ${L==='warenausgang'?`<button data-storno title="${r.storno?'Storno aufheben – Beträge zurückholen':'Verkauf stornieren – Beträge auf 0, Ware zurück ins Lager'}"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M6 6l12 12"/></svg></button>`:''}
     <button data-edit title="Bearbeiten"><svg viewBox="0 0 24 24"><path d="M4 20h4l10-10-4-4L4 16v4z"/><path d="M13.5 6.5l4 4"/></svg></button>
     <button data-del title="Löschen"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13"/></svg></button>
   </div></td></tr>`;
@@ -3013,7 +3016,7 @@ function wire(){
   });
   $$('#view tbody tr').forEach(tr=>{
     const e=tr.querySelector('[data-edit]'), d=tr.querySelector('[data-del]'), p=tr.querySelector('[data-pdf]');
-    const g=tr.querySelector('[data-got]');
+    const g=tr.querySelector('[data-got]'), st=tr.querySelector('[data-storno]');
     if(!e)return;
     const idx=[...tr.parentNode.children].indexOf(tr);
     // Preorder-Zeilen in den laufenden Kosten sind nur abgeleitet: Bearbeiten,
@@ -3023,6 +3026,7 @@ function wire(){
     e.onclick=()=>{ const r=currentSlice[idx]; if(r)openForm(lg(r),src(r)); };
     d.onclick=()=>{ const r=currentSlice[idx]; if(r)confirmDel(lg(r),src(r)); };
     if(p) p.onclick=()=>{ const r=currentSlice[idx]; if(r)viewReceipt(lg(r),src(r)); };
+    if(st) st.onclick=()=>{ const r=currentSlice[idx]; if(r)confirmStorno(src(r)); };
   });
 }
 async function viewReceipt(L,r){
@@ -3465,6 +3469,47 @@ function confirmDel(L,row){
   $('#cancelBtn').onclick=closeForm;
   $('#delBtn').onclick=async()=>{ try{ await removeRow(L,row); toast('Gelöscht'); closeForm(); draw(); }
     catch(e){ toast('Fehler'); } };
+  openPanel();
+}
+// Stornieren statt loeschen: die Zeile bleibt stehen, alle Betraege gehen auf 0.
+// Damit zaehlt der Verkauf nirgends mehr mit und die Ware steht wieder im Lager.
+// Die urspruenglichen Zahlen liegen unter row.storno, der Storno ist also umkehrbar.
+const STORNO_F=['qty','price','cust','fees','porto','net'];
+function bemToken(txt,token,an){
+  let t=String(txt||'').split(',').map(x=>x.trim()).filter(Boolean);
+  t=t.filter(x=>x.toLowerCase()!==token.toLowerCase());
+  if(an)t.unshift(token);
+  return t.join(', ');
+}
+async function stornoSetzen(row,an){
+  const r={...row}; delete r._ym;
+  if(an){
+    const alt={}; for(const k of STORNO_F) alt[k]=num(r[k]);
+    r.storno=alt; for(const k of STORNO_F) r[k]=0;
+    r.bem=bemToken(r.bem,'storniert',true);
+  }else{
+    const alt=r.storno||{};
+    for(const k of STORNO_F) r[k]=num(alt[k]);
+    delete r.storno; r.bem=bemToken(r.bem,'storniert',false);
+  }
+  await saveRow('warenausgang',r);
+}
+function confirmStorno(row){
+  const an=!row.storno, alt=row.storno||row;
+  editing={L:'warenausgang',row};
+  $('#panelTitle').textContent=an?'Verkauf stornieren':'Storno aufheben';
+  $('#panelBody').innerHTML=`<p style="color:var(--ink-soft)">${an
+    ?'Diesen Verkauf wirklich stornieren? Verkaufspreis, Gebühren, Porto und Netto gehen auf 0, die Ware steht wieder im Lager. Die Zeile bleibt mit der Bemerkung „storniert“ stehen.'
+    :'Den Storno wieder aufheben? Die ursprünglichen Beträge kommen zurück.'}</p>
+    <div class="calc" style="border-style:solid;margin-top:12px">
+      <span>${DDE(row.d)} · ${esc(row.sku||'')} · ${N0(num(alt.qty))} Stück${row.person?' · '+esc(row.person):''}</span>
+      <b>${CHF(num(alt.price))}</b></div>`;
+  $('#panelFoot').innerHTML=`<button class="btn ghost" id="cancelBtn" type="button">Abbrechen</button>
+    <button class="btn" id="stoBtn" type="button"${an?' style="background:var(--neg);border-color:var(--neg)"':''}>${an?'Stornieren':'Storno aufheben'}</button>`;
+  $('#cancelBtn').onclick=closeForm;
+  $('#stoBtn').onclick=async()=>{
+    try{ await stornoSetzen(row,an); toast(an?'Verkauf storniert':'Storno aufgehoben'); closeForm(); draw(); }
+    catch(e){ toast('Fehler beim Stornieren'); } };
   openPanel();
 }
 function openPanel(){ $('#scrim').classList.add('open'); $('#panel').classList.add('open'); }
