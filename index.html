@@ -1417,7 +1417,7 @@ const rcMaps=()=>{ maps.titel=maps.titel||{}; maps.teil=maps.teil||{}; maps.bund
 // Eine Zeile aus dem Bericht in den Zustand bringen, den die Import-Ansicht braucht.
 function rcZeile(r){
   const m=rcMaps(), t=rcTeile(r.titel), menge=rcMenge(r.titel);
-  const z={...r, menge, art:t.art, offen:t.art==='unbekannt'?t.anzahl:0, teile:[]};
+  const z={...r, menge, art:t.art, offen:t.art==='unbekannt'?t.anzahl:0, teile:[], porto:0};
   if(t.art==='teile'){
     const bek=m.bundle[r.titel];
     z.teile=t.teile.map((x,i)=>{
@@ -1449,18 +1449,20 @@ const rcOffen=z=>z.art==='einzeln'?!z.sku
 function rcBuchungen(z,feePct){
   const teile=rcSplit(z), hin=[];
   const r2=v=>+Number(v).toFixed(2);
-  let restP=r2(z.preis), restV=r2(z.versand);
+  const pTot=r2(num(z.porto)||0);
+  let restP=r2(z.preis), restV=r2(z.versand), restPo=pTot;
   teile.forEach((t,i)=>{
     const letzte=i===teile.length-1;
     const preis=letzte?restP:r2(z.preis*t.anteil);
     const vers=letzte?restV:r2(z.versand*t.anteil);
-    restP=r2(restP-preis); restV=r2(restV-vers);
+    const port=letzte?restPo:r2(pTot*t.anteil);
+    restP=r2(restP-preis); restV=r2(restV-vers); restPo=r2(restPo-port);
     const geb=r2(preis*feePct/100);
     const vor=[...rows('warenausgang'),...rows('wareneingang'),...rows('preorder')]
       .filter(x=>x.sku===t.sku).sort((a,b)=>(b.d||'').localeCompare(a.d||''))[0]||{};
     hin.push({id:uid(),d:z.d,sku:t.sku,cat:vor.cat||'',form:vor.form||'',set:vor.set||'',
-      qty:t.menge,price:preis,cust:vers,fees:geb,porto:0,
-      net:r2(preis+vers-geb),shop:'ricardo.ch',person:z.kaeufer,
+      qty:t.menge,price:preis,cust:vers,fees:geb,porto:port,
+      net:r2(preis+vers-geb-port),shop:'ricardo.ch',person:z.kaeufer,
       artikel:z.artikel||'',auktion:z.bestellung||'',bem:''});
   });
   return hin;
@@ -1486,11 +1488,14 @@ function viewRcImport(){
       <span class="count">Gebühren: <input type="text" inputmode="decimal" id="rcFee" value="${rcState.fee}"
         style="width:54px;text-align:right"> % vom Verkaufspreis</span>
     </div>
-    <p class="chart-hint">Der Bericht enthält keine Gebühren, darum der Prozentsatz. Porto trägst du
-      wie bisher selbst nach – was du der Post zahlst, weiss Ricardo nicht.</p></div>`;
+    <p class="chart-hint">Der Bericht enthält keine Gebühren, darum der Prozentsatz. Das Porto
+      weiss Ricardo nicht – das trägst du beim Zuordnen gleich je Verkauf ein.</p></div>`;
 
   const offen=zs.filter(rcOffen).length;
   const bereit=zs.length-offen;
+  const porto=i=>`<span class="count">Porto</span>
+      <input type="text" inputmode="decimal" data-rc="porto" data-i="${i}" value="${zs[i].porto||''}"
+        placeholder="0.00" style="width:72px;text-align:right" title="Was du der Post bezahlt hast – leer lassen, wenn noch offen">`;
   const row=(z,i)=>{
     const teile=z.art==='einzeln'?null:rcSplit(z);
     const kopf=`<div class="rc-kopf"><span class="mono count">${DDE(z.d)}</span>
@@ -1499,7 +1504,7 @@ function viewRcImport(){
     if(z.art==='einzeln') return `<div class="rc-zeile ${rcOffen(z)?'rc-offen':''}" data-i="${i}">${kopf}
       <div class="rc-teil"><span class="count">${z.menge}&times;</span>
         <input type="text" list="dl_rcsku" data-rc="sku" data-i="${i}" placeholder="SKU zuordnen…"
-          value="${esc(z.sku||'')}" autocomplete="off"></div></div>`;
+          value="${esc(z.sku||'')}" autocomplete="off">${porto(i)}</div></div>`;
     return `<div class="rc-zeile ${rcOffen(z)?'rc-offen':''}" data-i="${i}">${kopf}
       ${z.art==='unbekannt'?`<div class="cap">Inhalt steht nicht im Titel (${z.offen} Produkte) – bitte eintragen.</div>`:''}
       ${z.teile.map((t,j)=>`<div class="rc-teil">
@@ -1510,6 +1515,7 @@ function viewRcImport(){
         <span class="count rc-anteil" data-i="${i}" data-j="${j}">${teile[j]?CHF(z.preis*teile[j].anteil):''}</span>
         <button class="iconbtn" data-rcdel="${i}" data-j="${j}" title="Bestandteil entfernen">&times;</button>
       </div>`).join('')}
+      <div class="rc-teil">${porto(i)}<span class="count">auf die Bestandteile verteilt</span></div>
       <button class="btn ghost sm" data-rcadd="${i}">Bestandteil hinzufügen</button></div>`;
   };
   return `${dl}
@@ -1537,7 +1543,7 @@ function wireRcImport(){
     el.oninput=()=>{
       const z=rcState.zeilen[+el.dataset.i]; if(!z)return;
       const k=el.dataset.rc;
-      if(el.dataset.j===undefined){ z.sku=el.value.trim(); }
+      if(el.dataset.j===undefined){ if(k==='porto')z.porto=num(el.value); else z.sku=el.value.trim(); }
       else{ const t=z.teile[+el.dataset.j];
         if(k==='menge')t.menge=Math.max(1,parseInt(el.value,10)||1);
         else if(k==='b')t.b=num(el.value);
