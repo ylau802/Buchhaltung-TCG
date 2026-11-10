@@ -529,6 +529,21 @@ const N2=n=>new Intl.NumberFormat('de-CH',{minimumFractionDigits:2,maximumFracti
 const PCT=n=>((Number(n)||0)*100).toLocaleString('de-CH',{minimumFractionDigits:1,maximumFractionDigits:1})+'%';
 const DDE=d=>{ if(!d)return'—'; const p=String(d).slice(0,10).split('-'); return p.length===3?`${p[2]}.${p[1]}.${p[0]}`:d; };
 const YM=d=>String(d||'').slice(0,7);
+// Gesucht wird in allen Feldern, dazu im Datum nach Schweizer Art: 08.11.2026,
+// 8.11.2026, 08.11. oder 11.2026 finden dieselbe Zeile wie 2026-11-08.
+function suchTreffer(r,q){
+  if(!q) return true;
+  for(const v of Object.values(r)){
+    if(v==null||typeof v==='object') continue;
+    if(String(v).toLowerCase().includes(q)) return true;
+  }
+  for(const k of ['d','bis']){
+    const d=r[k]; if(!d) continue;
+    const de=DDE(d); if(de.includes(q)) return true;
+    if(de.split('.').map(x=>x.replace(/^0/,'')).join('.').includes(q)) return true;
+  }
+  return false;
+}
 const monthName=ym=>{ const [y,m]=ym.split('-'); return ['Jan','Feb','Mär','Apr','Mai','Jun','Jul','Aug','Sep','Okt','Nov','Dez'][+m-1]+' '+y.slice(2); };
 // Hochkomma und Leerzeichen sind in der Schweiz uebliche Tausendertrenner und
 // landen beim Tippen schnell im Feld; ohne sie zu entfernen wuerde aus
@@ -1327,8 +1342,7 @@ function viewLedger(L){
     if(state.cat&&r.cat!==state.cat)return false;
     if(state.shop&&r.shop!==state.shop)return false;
     if(state.month&&r._ym!==state.month)return false;
-    if(state.q){ const q=state.q.toLowerCase();
-      if(!Object.values(r).some(v=>String(v).toLowerCase().includes(q)))return false; }
+    if(state.q&&!suchTreffer(r,state.q.toLowerCase()))return false;
     return true;
   });
   // sort
@@ -3923,8 +3937,7 @@ function allFiltered(L,plain){
     if(state.cat&&r.cat!==state.cat)return false;
     if(state.shop&&r.shop!==state.shop)return false;
     if(state.month&&r._ym!==state.month)return false;
-    if(state.q){ const q=state.q.toLowerCase();
-      if(!Object.values(r).some(v=>String(v).toLowerCase().includes(q)))return false; }
+    if(state.q&&!suchTreffer(r,state.q.toLowerCase()))return false;
     return true;
   });
   const sk=state.sort.k,dir=state.sort.dir;
