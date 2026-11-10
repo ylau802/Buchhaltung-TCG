@@ -827,59 +827,6 @@ function lager(sellPred){
     buyQty:0,buyCost:0,sellQty:0,net:0,gross:0}; }
 }
 
-/* ---------- Vorzeichen-Pruefung bei Minus-Buchungen ---------- */
-// Eigengebrauch und Retouren bucht man als Eingang mit negativer Menge. Richtig
-// ist das nur, wenn der Stueckpreis positiv bleibt: Menge mal Stueckpreis ergibt
-// dann von selbst einen negativen Brutto, und die Kosten verlassen das Lager.
-// Steht das Minus stattdessen beim Stueckpreis, heben sich die Vorzeichen auf,
-// der Brutto wird positiv und die Kosten bleiben drin – der Ø EK/Stk steigt.
-function vzFalsch(L){
-  return rows(L).filter(r=>{
-    const q=num(r.qty), g=num(r.gross);
-    if(!q) return false;
-    return (q<0&&g>0)||(q>0&&g<0)||(q<0&&num(r.ek)<0);
-  });
-}
-function vzNeu(r){
-  const q=num(r.qty), sh=num(r.ship);
-  let ek=Math.abs(num(r.ek));
-  // Wurde seinerzeit nur der Brutto getippt, kommt der Stueckpreis daher zurueck.
-  if(!ek&&q) ek=Math.abs((num(r.gross)-sh)/q);
-  ek=+ek.toFixed(2);
-  return {ek, gross:+(q*ek+sh).toFixed(2)};
-}
-function confirmVz(L){
-  const bad=vzFalsch(L); if(!bad.length) return;
-  const zeig=bad.slice(0,12);
-  editing={L,row:null};
-  $('#panelTitle').textContent='Vorzeichen prüfen';
-  $('#panelBody').innerHTML=`<p style="color:var(--ink-soft)">
-    ${bad.length===1?'Ein Eintrag hat':bad.length+' Einträge haben'} Menge und Brutto mit demselben Vorzeichen.
-    Bei einer Minus-Buchung gehört das Minus nur zur Menge – der Stückpreis bleibt positiv,
-    dann wird der Brutto von selbst negativ und die Kosten gehen aus dem Lager.</p>
-    <table style="width:100%;font-size:12px;margin-top:12px;border-collapse:collapse">
-    <tr style="color:var(--muted);text-align:left"><th>Datum</th><th>SKU</th><th class="num">Menge</th>
-      <th class="num">EK</th><th class="num">Brutto</th><th class="num">neu</th></tr>
-    ${zeig.map(r=>{ const n=vzNeu(r); return `<tr>
-      <td class="mono">${DDE(r.d)}</td><td class="mono">${esc(r.sku||'')}</td>
-      <td class="num">${N0(num(r.qty))}</td><td class="num">${N2(num(r.ek))}</td>
-      <td class="num" style="color:var(--neg)">${N2(num(r.gross))}</td>
-      <td class="num"><b>${N2(n.gross)}</b></td></tr>`; }).join('')}
-    </table>
-    ${bad.length>zeig.length?`<p class="cap">… und ${bad.length-zeig.length} weitere.</p>`:''}`;
-  $('#panelFoot').innerHTML=`<button class="btn ghost" id="cancelBtn" type="button">Abbrechen</button>
-    <button class="btn" id="vzFix" type="button">${bad.length===1?'Eintrag':'Alle '+bad.length+' Einträge'} korrigieren</button>`;
-  $('#cancelBtn').onclick=closeForm;
-  $('#vzFix').onclick=async()=>{
-    try{
-      for(const r of bad){ const n=vzNeu(r); const c={...r}; delete c._ym;
-        c.ek=n.ek; c.gross=n.gross; await saveRow(L,c); }
-      toast(bad.length+(bad.length===1?' Eintrag korrigiert':' Einträge korrigiert'));
-      closeForm(); draw();
-    }catch(e){ toast('Fehler beim Korrigieren'); } };
-  openPanel();
-}
-
 /* ---------- Minus-Buchungen ohne Gegenbuchung ---------- */
 // Wer ein Display oeffnet, nimmt es aus dem Lager - der Wert bleibt aber im
 // Geschaeft, er steckt jetzt in Bulk oder in der Sammlung. Dazu gehoert eine
@@ -896,7 +843,7 @@ function umbOffen(L){
   const offen=[];
   for(const r of alle){
     const q=num(r.qty), g=num(r.gross);
-    if(!(q<0&&g<0)) continue;   // falsche Vorzeichen meldet die andere Pruefung
+    if(q>=0) continue;
     if(r.privat) continue;
     const soll=Math.abs(g);
     const t=gegen.find(x=>x.frei&&Math.abs(x.g-soll)<=0.05&&rcTage(x.d,r.d)<=UMB_TAGE);
@@ -937,6 +884,82 @@ function confirmUmb(L){
     const c={...r}; delete c._ym; c.privat=true;
     await saveRow(L,c); draw(); confirmUmb(L);
   };
+  openPanel();
+}
+
+/* ---------- Porto je Kaeufer buendeln ---------- */
+// Mehrere Verkaeufe an denselben Kaeufer innerhalb von zwei Tagen gehen in einem
+// Paket raus. Das Porto gehoert dann auf eine Zeile - am besten auf die teuerste,
+// dort faellt es bei der Marge am wenigsten ins Gewicht. Die uebrigen bekommen
+// Porto 0 und die Bemerkung "Sammelversand". Netto wird um dieselbe Differenz
+// nachgezogen, damit von Hand gesetzte Werte nicht verloren gehen.
+const hatTok=(t,tok)=>String(t||'').split(',').map(x=>x.trim().toLowerCase()).includes(tok.toLowerCase());
+function pbPlan(){
+  const list=(currentFiltered||[]).filter(r=>!r.storno&&rcNorm(r.person));
+  const nach=new Map();
+  for(const r of list){ const k=rcNorm(r.person);
+    if(!nach.has(k))nach.set(k,[]); nach.get(k).push(r); }
+  const gruppen=[];
+  for(const arr of nach.values()){
+    arr.sort((a,b)=>String(a.d||'').localeCompare(String(b.d||'')));
+    let lauf=[arr[0]];
+    for(let n=1;n<arr.length;n++){
+      const vor=lauf[lauf.length-1].d, jetzt=arr[n].d;
+      if(vor&&jetzt&&rcTage(vor,jetzt)<=2) lauf.push(arr[n]);
+      else { gruppen.push(lauf); lauf=[arr[n]]; }
+    }
+    gruppen.push(lauf);
+  }
+  return gruppen.map(g=>{
+    const summe=+g.reduce((a,r)=>a+num(r.porto),0).toFixed(2);
+    const ziel=g.slice().sort((a,b)=>num(b.price)-num(a.price))[0];
+    return {g,ziel,andere:g.filter(r=>r!==ziel),summe};
+  }).filter(x=>x.andere.length&&x.summe>0&&(
+    Math.abs(num(x.ziel.porto)-x.summe)>0.004
+    || x.andere.some(r=>!hatTok(r.bem,'Sammelversand'))));
+}
+function confirmPortoB(){
+  const plan=pbPlan();
+  if(!plan.length){ toast('Nichts zu bündeln – Porto steht schon je Käufer auf einer Zeile'); return; }
+  const zeig=plan.slice(0,15);
+  editing={L:'warenausgang',row:null};
+  $('#panelTitle').textContent='Porto bündeln';
+  $('#panelBody').innerHTML=`<p style="color:var(--ink-soft)">
+    Betrifft die <b>${(currentFiltered||[]).length}</b> gerade gefilterten Zeilen. In
+    ${plan.length===1?'einer Gruppe':plan.length+' Gruppen'} wandert das gesamte Porto auf den teuersten
+    Artikel, die übrigen bekommen Porto 0 und die Bemerkung „Sammelversand“. Netto wird mitgerechnet.</p>
+    <div style="margin-top:12px;display:flex;flex-direction:column;gap:10px">
+    ${zeig.map(x=>`<div class="calc" style="border-style:solid;flex-direction:column;align-items:stretch;gap:4px">
+      <div style="display:flex;gap:8px"><b>${esc(x.ziel.person||'')}</b>
+        <span class="count">${DDE(x.g[0].d)} · ${x.g.length} Zeilen</span>
+        <span style="flex:1"></span><span class="count">Porto ${CHF(x.summe)}</span></div>
+      ${x.g.map(r=>`<div style="display:flex;gap:8px;font-size:12px">
+        <span class="mono">${esc(r.sku||'')}</span><span class="count">${N2(num(r.price))}</span>
+        <span style="flex:1"></span>
+        <span${r===x.ziel?'':' class="count"'}>${r===x.ziel?'<b>Porto '+N2(x.summe)+'</b>':'Sammelversand'}</span>
+      </div>`).join('')}
+    </div>`).join('')}</div>
+    ${plan.length>zeig.length?`<p class="cap">… und ${plan.length-zeig.length} weitere Gruppen.</p>`:''}`;
+  $('#panelFoot').innerHTML=`<button class="btn ghost" id="cancelBtn" type="button">Abbrechen</button>
+    <button class="btn" id="pbGo" type="button">Übernehmen</button>`;
+  $('#cancelBtn').onclick=closeForm;
+  $('#pbGo').onclick=async()=>{
+    try{
+      let n=0;
+      for(const x of plan){
+        const alt=num(x.ziel.porto), z={...x.ziel}; delete z._ym;
+        z.porto=x.summe; z.net=+(num(z.net)+(alt-x.summe)).toFixed(2);
+        z.bem=bemToken(z.bem,'Sammelversand',false);
+        await saveRow('warenausgang',z); n++;
+        for(const r of x.andere){
+          const c={...r}; delete c._ym; const a=num(c.porto);
+          c.porto=0; c.net=+(num(c.net)+a).toFixed(2);
+          c.bem=bemToken(c.bem,'Sammelversand',true);
+          await saveRow('warenausgang',c); n++;
+        }
+      }
+      toast(n+' Zeilen angepasst'); closeForm(); draw();
+    }catch(e){ toast('Fehler beim Bündeln'); } };
   openPanel();
 }
 
@@ -1304,7 +1327,8 @@ function viewLedger(L){
     <div><h1>${title}</h1><p>${sub}</p></div>
     <div class="expbar">${exportBar()}
       ${L==='warenausgang'?`<button class="btn ghost" id="rcBtn" title="Verkaufsbericht von ricardo.ch einlesen">Ricardo-Import</button>
-      <button class="btn ghost" id="fxBtn" title="Echte Gebühren aus der Ricardo-Abrechnung übernehmen">Gebühren abgleichen</button>`:''}
+      <button class="btn ghost" id="fxBtn" title="Echte Gebühren aus der Ricardo-Abrechnung übernehmen">Gebühren abgleichen</button>
+      <button class="btn ghost" id="pbBtn" title="Porto je Käufer auf den teuersten Artikel legen, die übrigen als Sammelversand">Porto bündeln</button>`:''}
       <button class="btn" id="addBtn"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>Neuer Eintrag</button></div>
   </div>
 
@@ -1326,10 +1350,6 @@ function viewLedger(L){
     ${L==='preorder'?`· offen <b>${CHF(totals.gross)}</b> · ${N0(totals.qty)} Stück ausstehend`:''}
   </div>
 
-  ${BUYGOODS.includes(L)&&vzFalsch(L).length?`<div class="banner warn"><span>
-    <b>${vzFalsch(L).length} ${vzFalsch(L).length===1?'Eintrag hat':'Einträge haben'} ein widersprüchliches Vorzeichen.</b>
-    Menge negativ, Brutto positiv – so bleiben die Kosten im Lager stehen und der Ø EK/Stk steigt.</span>
-    <button class="btn ghost sm" id="vzBtn" style="margin-left:auto;flex:none">Ansehen</button></div>`:''}
   ${BUYGOODS.includes(L)&&umbOffen(L).length?`<div class="banner"><span>
     <b>${umbOffen(L).length} Minus-${umbOffen(L).length===1?'Buchung hat':'Buchungen haben'} keine Gegenbuchung
     auf Bulk oder Sammlung.</b> Falls du die Ware geöffnet und weiterverkauft hast, fehlt der Einstand
@@ -3154,8 +3174,8 @@ function wire(){
     if(syncState==='ok') toast('Aktueller Stand geladen'); draw(); });
   bind('dBundle',loadFromBundle);
   bind('bulkBtn',openBulk);
-  bind('vzBtn',()=>confirmVz(route));
   bind('umbBtn',()=>confirmUmb(route));
+  bind('pbBtn',confirmPortoB);
   const sv=$('#savedAt'); if(sv)sv.textContent = lastSaved ? 'Zuletzt auf diesem Gerät gespeichert: '+lastSaved : 'Noch nicht gespeichert.';
   if($('#recDownload')){
     $$('.recLedger').forEach(c=>c.onchange=updateRecCount);
