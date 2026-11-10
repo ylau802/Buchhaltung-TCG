@@ -924,10 +924,17 @@ function confirmPortoB(){
   const zeig=plan.slice(0,15);
   editing={L:'warenausgang',row:null};
   $('#panelTitle').textContent='Porto bündeln';
+  // Welcher Filter gerade gilt, steht im Panel – sonst buendelt man aus Versehen alles.
+  const ff=[state.q?`Suche „${state.q}“`:'',state.cat?`Kategorie ${state.cat}`:'',
+    state.shop?`Laden ${state.shop}`:'',state.month?monthName(state.month):''].filter(Boolean).join(' · ');
+  const tage=[...new Set(plan.flatMap(x=>x.g.map(r=>r.d)))].sort();
   $('#panelBody').innerHTML=`<p style="color:var(--ink-soft)">
-    Betrifft die <b>${(currentFiltered||[]).length}</b> gerade gefilterten Zeilen. In
-    ${plan.length===1?'einer Gruppe':plan.length+' Gruppen'} wandert das gesamte Porto auf den teuersten
-    Artikel, die übrigen bekommen Porto 0 und die Bemerkung „Sammelversand“. Netto wird mitgerechnet.</p>
+    ${ff?`Filter: <b>${esc(ff)}</b> – ${(currentFiltered||[]).length} Zeilen.`
+        :`<b style="color:var(--neg)">Kein Filter gesetzt</b> – das betrifft alle ${(currentFiltered||[]).length} Zeilen.`}
+    Betroffen ${tage.length===1?'ist der':'sind die Tage'} <b>${tage.slice(0,4).map(DDE).join(', ')}${tage.length>4?' …':''}</b>.</p>
+    <p style="color:var(--ink-soft)">In ${plan.length===1?'einer Gruppe':plan.length+' Gruppen'} wandert das gesamte
+    Porto auf den teuersten Artikel, die übrigen bekommen Porto 0 und die Bemerkung „Sammelversand“.
+    Netto wird mitgerechnet.</p>
     <div style="margin-top:12px;display:flex;flex-direction:column;gap:10px">
     ${zeig.map(x=>`<div class="calc" style="border-style:solid;flex-direction:column;align-items:stretch;gap:4px">
       <div style="display:flex;gap:8px"><b>${esc(x.ziel.person||'')}</b>
