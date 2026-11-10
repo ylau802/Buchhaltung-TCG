@@ -852,6 +852,34 @@ function umbOffen(L){
   }
   return offen;
 }
+const privatZeilen=L=>rows(L).filter(r=>r.privat);
+// Versehentlich abgehakt? Hier kommen die Zeilen zurueck in die Pruefung.
+function confirmPrivat(L){
+  const liste=privatZeilen(L);
+  if(!liste.length){ closeForm(); draw(); return; }
+  editing={L,row:null};
+  $('#panelTitle').textContent='Als privat abgehakt';
+  $('#panelBody').innerHTML=`<p style="color:var(--ink-soft)">
+    Diese Minus-Buchungen gelten als echte Privatentnahme und werden nicht mehr nach einer
+    Gegenbuchung gefragt. „Zurückholen“ macht das rückgängig – die Zeile taucht dann wieder
+    in der Prüfung auf.</p>
+    <div style="margin-top:12px;display:flex;flex-direction:column;gap:8px">
+    ${liste.map(r=>`<div class="calc" style="border-style:solid;gap:8px;flex-wrap:wrap">
+      <span class="mono">${DDE(r.d)}</span>
+      <span>${esc(r.sku||'')} · ${N0(num(r.qty))} Stück</span>
+      <b>${N2(num(r.gross))}</b>
+      <span style="flex:1"></span>
+      <button class="btn ghost sm" data-privw="${r.id}">zurückholen</button>
+    </div>`).join('')}</div>`;
+  $('#panelFoot').innerHTML=`<button class="btn ghost" id="cancelBtn" type="button">Schliessen</button>`;
+  $('#cancelBtn').onclick=closeForm;
+  for(const b of $$('[data-privw]')) b.onclick=async()=>{
+    const r=store[L].find(x=>x.id===b.dataset.privw); if(!r)return;
+    const c={...r}; delete c._ym; delete c.privat;
+    await saveRow(L,c); toast('Haken entfernt'); draw(); confirmPrivat(L);
+  };
+  openPanel();
+}
 function confirmUmb(L){
   const off=umbOffen(L);
   if(!off.length){ closeForm(); draw(); return; }
@@ -1336,6 +1364,7 @@ function viewLedger(L){
       ${L==='warenausgang'?`<button class="btn ghost" id="rcBtn" title="Verkaufsbericht von ricardo.ch einlesen">Ricardo-Import</button>
       <button class="btn ghost" id="fxBtn" title="Echte Gebühren aus der Ricardo-Abrechnung übernehmen">Gebühren abgleichen</button>
       <button class="btn ghost" id="pbBtn" title="Porto je Käufer auf den teuersten Artikel legen, die übrigen als Sammelversand">Porto bündeln</button>`:''}
+      ${BUYGOODS.includes(L)&&privatZeilen(L).length?`<button class="btn ghost" id="privBtn" title="Minus-Buchungen, die du als Privatentnahme abgehakt hast">Privat (${privatZeilen(L).length})</button>`:''}
       <button class="btn" id="addBtn"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>Neuer Eintrag</button></div>
   </div>
 
@@ -3183,6 +3212,7 @@ function wire(){
   bind('bulkBtn',openBulk);
   bind('umbBtn',()=>confirmUmb(route));
   bind('pbBtn',confirmPortoB);
+  bind('privBtn',()=>confirmPrivat(route));
   const sv=$('#savedAt'); if(sv)sv.textContent = lastSaved ? 'Zuletzt auf diesem Gerät gespeichert: '+lastSaved : 'Noch nicht gespeichert.';
   if($('#recDownload')){
     $$('.recLedger').forEach(c=>c.onchange=updateRecCount);
