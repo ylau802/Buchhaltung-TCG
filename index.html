@@ -827,6 +827,59 @@ function lager(sellPred){
     buyQty:0,buyCost:0,sellQty:0,net:0,gross:0}; }
 }
 
+/* ---------- Vorzeichen-Pruefung bei Minus-Buchungen ---------- */
+// Eigengebrauch und Retouren bucht man als Eingang mit negativer Menge. Richtig
+// ist das nur, wenn der Stueckpreis positiv bleibt: Menge mal Stueckpreis ergibt
+// dann von selbst einen negativen Brutto, und die Kosten verlassen das Lager.
+// Steht das Minus stattdessen beim Stueckpreis, heben sich die Vorzeichen auf,
+// der Brutto wird positiv und die Kosten bleiben drin – der Ø EK/Stk steigt.
+function vzFalsch(L){
+  return rows(L).filter(r=>{
+    const q=num(r.qty), g=num(r.gross);
+    if(!q) return false;
+    return (q<0&&g>0)||(q>0&&g<0)||(q<0&&num(r.ek)<0);
+  });
+}
+function vzNeu(r){
+  const q=num(r.qty), sh=num(r.ship);
+  let ek=Math.abs(num(r.ek));
+  // Wurde seinerzeit nur der Brutto getippt, kommt der Stueckpreis daher zurueck.
+  if(!ek&&q) ek=Math.abs((num(r.gross)-sh)/q);
+  ek=+ek.toFixed(2);
+  return {ek, gross:+(q*ek+sh).toFixed(2)};
+}
+function confirmVz(L){
+  const bad=vzFalsch(L); if(!bad.length) return;
+  const zeig=bad.slice(0,12);
+  editing={L,row:null};
+  $('#panelTitle').textContent='Vorzeichen prüfen';
+  $('#panelBody').innerHTML=`<p style="color:var(--ink-soft)">
+    ${bad.length===1?'Ein Eintrag hat':bad.length+' Einträge haben'} Menge und Brutto mit demselben Vorzeichen.
+    Bei einer Minus-Buchung gehört das Minus nur zur Menge – der Stückpreis bleibt positiv,
+    dann wird der Brutto von selbst negativ und die Kosten gehen aus dem Lager.</p>
+    <table style="width:100%;font-size:12px;margin-top:12px;border-collapse:collapse">
+    <tr style="color:var(--muted);text-align:left"><th>Datum</th><th>SKU</th><th class="num">Menge</th>
+      <th class="num">EK</th><th class="num">Brutto</th><th class="num">neu</th></tr>
+    ${zeig.map(r=>{ const n=vzNeu(r); return `<tr>
+      <td class="mono">${DDE(r.d)}</td><td class="mono">${esc(r.sku||'')}</td>
+      <td class="num">${N0(num(r.qty))}</td><td class="num">${N2(num(r.ek))}</td>
+      <td class="num" style="color:var(--neg)">${N2(num(r.gross))}</td>
+      <td class="num"><b>${N2(n.gross)}</b></td></tr>`; }).join('')}
+    </table>
+    ${bad.length>zeig.length?`<p class="cap">… und ${bad.length-zeig.length} weitere.</p>`:''}`;
+  $('#panelFoot').innerHTML=`<button class="btn ghost" id="cancelBtn" type="button">Abbrechen</button>
+    <button class="btn" id="vzFix" type="button">${bad.length===1?'Eintrag':'Alle '+bad.length+' Einträge'} korrigieren</button>`;
+  $('#cancelBtn').onclick=closeForm;
+  $('#vzFix').onclick=async()=>{
+    try{
+      for(const r of bad){ const n=vzNeu(r); const c={...r}; delete c._ym;
+        c.ek=n.ek; c.gross=n.gross; await saveRow(L,c); }
+      toast(bad.length+(bad.length===1?' Eintrag korrigiert':' Einträge korrigiert'));
+      closeForm(); draw();
+    }catch(e){ toast('Fehler beim Korrigieren'); } };
+  openPanel();
+}
+
 /* ---------- period filter ---------- */
 function allMonths(){
   const all=new Set();
@@ -1213,6 +1266,10 @@ function viewLedger(L){
     ${L==='preorder'?`· offen <b>${CHF(totals.gross)}</b> · ${N0(totals.qty)} Stück ausstehend`:''}
   </div>
 
+  ${BUYGOODS.includes(L)&&vzFalsch(L).length?`<div class="banner warn"><span>
+    <b>${vzFalsch(L).length} ${vzFalsch(L).length===1?'Eintrag hat':'Einträge haben'} ein widersprüchliches Vorzeichen.</b>
+    Menge negativ, Brutto positiv – so bleiben die Kosten im Lager stehen und der Ø EK/Stk steigt.</span>
+    <button class="btn ghost sm" id="vzBtn" style="margin-left:auto;flex:none">Ansehen</button></div>`:''}
   ${catBreak?`<div class="card" style="padding:14px 18px"><div class="bd">${catBreak}</div></div>`:''}
 
   <div class="tbl-wrap">
@@ -3032,6 +3089,7 @@ function wire(){
     if(syncState==='ok') toast('Aktueller Stand geladen'); draw(); });
   bind('dBundle',loadFromBundle);
   bind('bulkBtn',openBulk);
+  bind('vzBtn',()=>confirmVz(route));
   const sv=$('#savedAt'); if(sv)sv.textContent = lastSaved ? 'Zuletzt auf diesem Gerät gespeichert: '+lastSaved : 'Noch nicht gespeichert.';
   if($('#recDownload')){
     $$('.recLedger').forEach(c=>c.onchange=updateRecCount);
