@@ -842,94 +842,6 @@ function lager(sellPred){
     buyQty:0,buyCost:0,sellQty:0,net:0,gross:0}; }
 }
 
-/* ---------- Minus-Buchungen ohne Gegenbuchung ---------- */
-// Wer ein Display oeffnet, nimmt es aus dem Lager - der Wert bleibt aber im
-// Geschaeft, er steckt jetzt in Bulk oder in der Sammlung. Dazu gehoert eine
-// zweite Zeile mit demselben Betrag auf der neuen SKU. Fehlt sie, verschwinden
-// die Kosten und spaetere Verkaeufe aus diesem Material haben keinen Einstand.
-// Echte Privatentnahmen brauchen keine Gegenbuchung; die lassen sich abhaken.
-const UMB_SKU=/bulk|sammlung/i;
-const UMB_TAGE=7;
-function umbOffen(L){
-  const alle=rows(L);
-  // Jede Plus-Buchung auf Bulk/Sammlung kann nur eine Minus-Zeile decken.
-  const gegen=alle.filter(r=>num(r.qty)>0&&num(r.gross)>0&&UMB_SKU.test(r.sku||''))
-    .map(r=>({d:r.d,g:num(r.gross),frei:true}));
-  const offen=[];
-  for(const r of alle){
-    const q=num(r.qty), g=num(r.gross);
-    if(q>=0) continue;
-    if(r.privat) continue;
-    const soll=Math.abs(g);
-    const t=gegen.find(x=>x.frei&&Math.abs(x.g-soll)<=0.05&&rcTage(x.d,r.d)<=UMB_TAGE);
-    if(t){ t.frei=false; continue; }
-    offen.push(r);
-  }
-  return offen;
-}
-const privatZeilen=L=>rows(L).filter(r=>r.privat);
-// Versehentlich abgehakt? Hier kommen die Zeilen zurueck in die Pruefung.
-function confirmPrivat(L){
-  const liste=privatZeilen(L);
-  if(!liste.length){ closeForm(); draw(); return; }
-  editing={L,row:null};
-  $('#panelTitle').textContent='Als privat abgehakt';
-  $('#panelBody').innerHTML=`<p style="color:var(--ink-soft)">
-    Diese Minus-Buchungen gelten als echte Privatentnahme und werden nicht mehr nach einer
-    Gegenbuchung gefragt. „Zurückholen“ macht das rückgängig – die Zeile taucht dann wieder
-    in der Prüfung auf.</p>
-    <div style="margin-top:12px;display:flex;flex-direction:column;gap:8px">
-    ${liste.map(r=>`<div class="calc" style="border-style:solid;gap:8px;flex-wrap:wrap">
-      <span class="mono">${DDE(r.d)}</span>
-      <span>${esc(r.sku||'')} · ${N0(num(r.qty))} Stück</span>
-      <b>${N2(num(r.gross))}</b>
-      <span style="flex:1"></span>
-      <button class="btn ghost sm" data-privw="${r.id}">zurückholen</button>
-    </div>`).join('')}</div>`;
-  $('#panelFoot').innerHTML=`<button class="btn ghost" id="cancelBtn" type="button">Schliessen</button>`;
-  $('#cancelBtn').onclick=closeForm;
-  for(const b of $$('[data-privw]')) b.onclick=async()=>{
-    const r=store[L].find(x=>x.id===b.dataset.privw); if(!r)return;
-    const c={...r}; delete c._ym; delete c.privat;
-    await saveRow(L,c); toast('Haken entfernt'); draw(); confirmPrivat(L);
-  };
-  openPanel();
-}
-function confirmUmb(L){
-  const off=umbOffen(L);
-  if(!off.length){ closeForm(); draw(); return; }
-  editing={L,row:null};
-  $('#panelTitle').textContent='Minus-Buchungen prüfen';
-  $('#panelBody').innerHTML=`<p style="color:var(--ink-soft)">
-    Zu ${off.length===1?'dieser Minus-Buchung':'diesen Minus-Buchungen'} gibt es keine Zeile mit demselben
-    Betrag auf einer Bulk- oder Sammlungs-SKU. Hast du die Ware geöffnet und verkaufst sie weiter,
-    fehlt die Gegenbuchung – sonst sind die Kosten verloren. War es eine echte Privatentnahme,
-    hak sie ab, dann fragt die App nicht mehr.</p>
-    <div style="margin-top:12px;display:flex;flex-direction:column;gap:8px">
-    ${off.map(r=>`<div class="calc" style="border-style:solid;gap:8px;flex-wrap:wrap">
-      <span class="mono">${DDE(r.d)}</span>
-      <span>${esc(r.sku||'')} · ${N0(num(r.qty))} Stück</span>
-      <b style="color:var(--neg)">${N2(num(r.gross))}</b>
-      <span style="flex:1"></span>
-      <button class="btn ghost sm" data-umbg="${r.id}">Gegenbuchung…</button>
-      <button class="btn ghost sm" data-umbp="${r.id}" title="Echte Privatentnahme – keine Gegenbuchung nötig">privat</button>
-    </div>`).join('')}</div>`;
-  $('#panelFoot').innerHTML=`<button class="btn ghost" id="cancelBtn" type="button">Schliessen</button>`;
-  $('#cancelBtn').onclick=closeForm;
-  for(const b of $$('[data-umbg]')) b.onclick=()=>{
-    const r=store[L].find(x=>x.id===b.dataset.umbg); if(!r)return;
-    const betrag=Math.abs(num(r.gross));
-    closeForm();
-    openForm(L,null,{d:r.d,cat:r.cat||'',set:r.set||'',qty:1,ek:betrag,gross:betrag,shop:'Umbuchung'});
-  };
-  for(const b of $$('[data-umbp]')) b.onclick=async()=>{
-    const r=store[L].find(x=>x.id===b.dataset.umbp); if(!r)return;
-    const c={...r}; delete c._ym; c.privat=true;
-    await saveRow(L,c); draw(); confirmUmb(L);
-  };
-  openPanel();
-}
-
 /* ---------- Porto je Kaeufer buendeln ---------- */
 // Mehrere Verkaeufe an denselben Kaeufer innerhalb von zwei Tagen gehen in einem
 // Paket raus. Das Porto gehoert dann auf eine Zeile - am besten auf die teuerste,
@@ -1378,7 +1290,6 @@ function viewLedger(L){
       ${L==='warenausgang'?`<button class="btn ghost" id="rcBtn" title="Verkaufsbericht von ricardo.ch einlesen">Ricardo-Import</button>
       <button class="btn ghost" id="fxBtn" title="Echte Gebühren aus der Ricardo-Abrechnung übernehmen">Gebühren abgleichen</button>
       <button class="btn ghost" id="pbBtn" title="Porto je Käufer auf den teuersten Artikel legen, die übrigen als Sammelversand">Porto bündeln</button>`:''}
-      ${BUYGOODS.includes(L)&&privatZeilen(L).length?`<button class="btn ghost" id="privBtn" title="Minus-Buchungen, die du als Privatentnahme abgehakt hast">Privat (${privatZeilen(L).length})</button>`:''}
       <button class="btn" id="addBtn"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>Neuer Eintrag</button></div>
   </div>
 
@@ -1400,11 +1311,6 @@ function viewLedger(L){
     ${L==='preorder'?`· offen <b>${CHF(totals.gross)}</b> · ${N0(totals.qty)} Stück ausstehend`:''}
   </div>
 
-  ${BUYGOODS.includes(L)&&umbOffen(L).length?`<div class="banner"><span>
-    <b>${umbOffen(L).length} Minus-${umbOffen(L).length===1?'Buchung hat':'Buchungen haben'} keine Gegenbuchung
-    auf Bulk oder Sammlung.</b> Falls du die Ware geöffnet und weiterverkauft hast, fehlt der Einstand
-    für das neue Material.</span>
-    <button class="btn ghost sm" id="umbBtn" style="margin-left:auto;flex:none">Ansehen</button></div>`:''}
   ${catBreak?`<div class="card" style="padding:14px 18px"><div class="bd">${catBreak}</div></div>`:''}
 
   <div class="tbl-wrap">
@@ -3224,9 +3130,7 @@ function wire(){
     if(syncState==='ok') toast('Aktueller Stand geladen'); draw(); });
   bind('dBundle',loadFromBundle);
   bind('bulkBtn',openBulk);
-  bind('umbBtn',()=>confirmUmb(route));
   bind('pbBtn',confirmPortoB);
-  bind('privBtn',()=>confirmPrivat(route));
   const sv=$('#savedAt'); if(sv)sv.textContent = lastSaved ? 'Zuletzt auf diesem Gerät gespeichert: '+lastSaved : 'Noch nicht gespeichert.';
   if($('#recDownload')){
     $$('.recLedger').forEach(c=>c.onchange=updateRecCount);
