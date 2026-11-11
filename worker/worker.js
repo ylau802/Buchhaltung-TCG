@@ -1975,7 +1975,7 @@ async function sendPush(env, events, test, budget) {
   const rest = reihe.slice(n);
   const pre = test ? 'Test: ' : '';
   const msgs = single.map((e, i) => ({
-    p: e.pri ? 1 : 0,
+    p: (e.pri || test) ? 1 : 0,
     c: wogCart(e.u),
     t: clip(pre + KIND_LABEL[e.k] + (e.s ? ' · ' + e.s : '') + (e.l ? ' · ' + e.l : ''), 80),
     b: clip(clip(e.t, 90) + '\n' + describe(e), 220),
@@ -1984,6 +1984,7 @@ async function sendPush(env, events, test, budget) {
   }));
   if (rest.length) {
     msgs.push({
+      p: rest.some((e) => e.pri) ? 1 : 0,
       t: clip(pre + '+' + rest.length + ' weitere Meldungen', 80),
       b: clip(rest.slice(0, 3).map((e) => clip(e.t, 60)).join('\n') + (rest.length > 3 ? '\n…' : ''), 220),
       g: 'ev-rest-' + Date.now(),
