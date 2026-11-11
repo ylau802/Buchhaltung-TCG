@@ -1929,6 +1929,11 @@ async function readPush(env) {
   return s ? JSON.parse(s) : [];
 }
 const clip = (t, n) => (String(t).length > n ? String(t).slice(0, n - 1) + '…' : String(t));
+// wog.ch: aus .../details/product/123-Titel wird .../cart.add/product/123-Titel.
+// Ein Tipp legt den Artikel in den Warenkorb – bestellt wird er damit nicht,
+// das macht weiterhin ein Mensch im Shop.
+const wogCart = (u) => (/^https:\/\/www\.wog\.ch\/.+\/details\/product\//.test(String(u || ''))
+  ? String(u).replace('/details/product/', '/cart.add/product/') : '');
 
 // Eine Nachricht an alle angemeldeten Geräte; tote Abos (404/410) werden vermerkt.
 async function pushOne(env, subs, v, msg, dead) {
@@ -1971,6 +1976,7 @@ async function sendPush(env, events, test, budget) {
   const pre = test ? 'Test: ' : '';
   const msgs = single.map((e, i) => ({
     p: e.pri ? 1 : 0,
+    c: wogCart(e.u),
     t: clip(pre + KIND_LABEL[e.k] + (e.s ? ' · ' + e.s : '') + (e.l ? ' · ' + e.l : ''), 80),
     b: clip(clip(e.t, 90) + '\n' + describe(e), 220),
     // eigener tag je Meldung, sonst ersetzen sich die Nachrichten auf dem Gerät
@@ -2000,6 +2006,9 @@ async function sendPush(env, events, test, budget) {
 function diff(src, list, prev, init, now, silentFrom) {
   const next = Object.assign({}, prev);
   const events = [];
+  // wog.ch ist der Laden, bei dem Minuten zaehlen: jede Meldung von dort geht
+  // dringend raus und leuchtet auf dem Handy auf, der Rest bleibt still.
+  const eilig = src.type === 'wog';
   const limit = silentFrom == null ? Infinity : silentFrom;
   let i = -1;
   for (const it of list) {
@@ -2012,11 +2021,11 @@ function diff(src, list, prev, init, now, silentFrom) {
       // Wiederauffuellung - und genau das ist die Meldung, die keine Minute warten darf.
       if (it.rd) ev.rd = it.rd;
       const kuenftig = !!(it.rd && it.rd > now.slice(0, 10));
-      if (!old) { if (i < limit) events.push(Object.assign({ k: 'new' }, ev, kuenftig && it.a === 1 ? { pri: 1 } : null)); }
+      if (!old) { if (i < limit) events.push(Object.assign({ k: 'new' }, ev, eilig || (kuenftig && it.a === 1) ? { pri: 1 } : null)); }
       else {
         const moved = old[0] != null && it.p != null ? it.p - old[0] : 0;
         if (it.a === 1 && Math.abs(moved) > PRICE_MIN + 0.004) {
-          events.push(Object.assign({ k: 'price', o: old[0] }, ev));
+          events.push(Object.assign({ k: 'price', o: old[0] }, ev, eilig ? { pri: 1 } : null));
         } else if (it.a === 1 && moved) {
           // Kleiner Ausschlag (bei Importshops oft taeglich der Wechselkurs): nicht melden,
           // aber den alten Preis als Bezugspunkt behalten. So faellt ein echtes Klettern
@@ -2025,7 +2034,7 @@ function diff(src, list, prev, init, now, silentFrom) {
         }
         if (old[1] === 0 && it.a === 1) events.push(kuenftig
           ? Object.assign({ k: 'pre', pri: 1 }, ev)
-          : Object.assign({ k: 'stock' }, ev));
+          : Object.assign({ k: 'stock' }, ev, eilig ? { pri: 1 } : null));
       }
     }
     next[it.id] = [keep == null ? it.p : keep, it.a];

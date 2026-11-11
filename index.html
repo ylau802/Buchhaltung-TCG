@@ -2701,6 +2701,9 @@ function wireFind(){
 const news={data:null,loading:false,bg:0,err:'',fr:'',lang:'',kind:'',src:'',q:'',showSrc:false,showWatch:false,urls:'',addName:'',addNameTouched:false,addFr:[],fedit:null,ren:null,cfName:'',cfKw:'',msgs:[],auto:false,chat:[],wurls:'',wbusy:false};
 const newsCatalog=()=>(news.data&&news.data.catalog)||['Pokémon','One Piece','Dragon Ball'];
 const NEWS_KIND={new:'Neu',price:'Preis',stock:'Wieder verfügbar',pre:'Vorverkauf'};
+// wog.ch legt per Link in den Warenkorb – derselbe Pfad, nur cart.add statt details.
+const wogKorb=u=>/^https:\/\/www\.wog\.ch\/.+\/details\/product\//.test(String(u||''))
+  ? String(u).replace('/details/product/','/cart.add/product/') : '';
 // Sprache, wie der Worker sie am Artikel erkannt hat (leer = steht nirgends).
 const NEWS_LANG={EN:'Englisch',DE:'Deutsch',FR:'Französisch',IT:'Italienisch',JP:'Japanisch',CN:'Chinesisch',KR:'Koreanisch',ES:'Spanisch',PT:'Portugiesisch'};
 // Ereignisse der letzten 24 h
@@ -3050,7 +3053,9 @@ function viewNews(){
       <td data-l="Preis" class="num"><span>${price(e)}</span></td>
       <td data-l="Status"><span><span class="tag-dot" style="background:${e.a?'var(--pos)':'var(--faint)'}"></span>${e.a?'verfügbar':'ausverkauft'}</span></td>
       <td data-l="Wann">${esc(ago(e.at))}</td>
-      <td><a class="btn ghost sm" href="${esc(e.u)}" target="_blank" rel="noopener">Öffnen ↗</a></td>
+      <td><div style="display:flex;gap:6px;justify-content:flex-end">
+        ${wogKorb(e.u)?`<a class="btn ghost sm" href="${esc(wogKorb(e.u))}" target="_blank" rel="noopener" title="Bei wog.ch in den Warenkorb legen – bestellt wird erst im Shop">Warenkorb</a>`:''}
+        <a class="btn ghost sm" href="${esc(e.u)}" target="_blank" rel="noopener">Öffnen ↗</a></div></td>
     </tr>`).join('')||`<tr><td colspan="6"><div class="empty">${(d.events||[]).length?'Keine Treffer.':'Noch keine Ereignisse – die erste Prüfung merkt sich nur den aktuellen Stand, ab dann wird Neues hier gelistet.'}</div></td></tr>`}</tbody>
   </table></div>
   <p class="chart-hint">Der Worker prüft alle 5 Minuten reihum die Quellen (bei vielen Quellen dauert ein voller Durchgang entsprechend länger). Bei Ereignissen kommt eine Push-Nachricht – je Meldung eine.</p>`
