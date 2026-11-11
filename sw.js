@@ -15,6 +15,10 @@ self.addEventListener('push', (event) => {
     badge: 'icons/badge-mono-96.png',
     tag: d.g || 'yl-news',
     renotify: true,
+    // p = wichtig (Vorverkauf): bleibt stehen, bis man sie wegtippt, und vibriert
+    // anders als der Rest. Alles andere verschwindet wie gewohnt von selbst.
+    requireInteraction: !!d.p,
+    vibrate: d.p ? [120, 60, 120, 60, 240] : [120],
     data: { go: 'news' },
   }));
 });

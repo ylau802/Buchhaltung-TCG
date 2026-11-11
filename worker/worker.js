@@ -314,16 +314,29 @@ async function fetchShopify(src, max) {
   return { list: out, pages, bytes, truncated };
 }
 
-async function fetchWog(src) {
+// wog.ch kennt zwei Listen, die zusammen erst das Bild ergeben:
+//   lastAdded  - was neu in den Katalog kam, neuste zuerst
+//   releases   - alles mit kuenftigem Erscheinungsdatum, also der ganze Vorverkauf
+// Vorher wurden nur die 48 neuesten gelesen. Bei 890 Trading-Cards-Artikeln faellt
+// ein Display, das vor zwei Wochen angekuendigt wurde, da laengst heraus - und wenn
+// genau dort der Vorverkauf aufgeht, sieht es niemand. Die releases-Liste haelt jeden
+// angekuendigten Artikel bis zum Erscheinen im Blick.
+const WOG_ROWS = { lastAdded: 96, releases: 200 };
+// "20.11.2026" -> "2026-11-20"
+function wogDate(t) {
+  const m = /^(\d{2})\.(\d{2})\.(\d{4})$/.exec(String(t || '').trim());
+  return m ? m[3] + '-' + m[2] + '-' + m[1] : null;
+}
+async function wogList(src, listType) {
   const { data, bytes } = await getJson(WOG_LIST, {
     method: 'POST',
     headers: {
       'User-Agent': WATCH_UA, Accept: 'application/json',
       'X-Requested-With': 'XMLHttpRequest',
       'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-      'Referer': 'https://www.wog.ch/de/index.cfm/lastAdded/platform/Trading-Cards',
+      'Referer': 'https://www.wog.ch/de/index.cfm/' + listType + '/platform/Trading-Cards',
     },
-    body: 'listType=lastAdded&platform=Trading-Cards&maxRows=48&page=1',
+    body: 'listType=' + listType + '&platform=Trading-Cards&maxRows=' + WOG_ROWS[listType] + '&page=1',
   });
   if (!Array.isArray(data.products)) throw new Error('wog.ch: unerwartetes Antwortformat');
   const list = data.products
@@ -335,8 +348,18 @@ async function fetchWog(src) {
       u: p.linkTo,
       i: p.coverSmallImage ? 'https://www.wog.ch' + p.coverSmallImage : '',
       g: franchiseOf(p.fullTitle || p.title || ''),
+      rd: wogDate(p.releaseDateOnly),
     }));
-  return { list, pages: 1, bytes };
+  return { list, bytes };
+}
+async function fetchWog(src) {
+  const neu = await wogList(src, 'lastAdded');
+  let vor = { list: [], bytes: 0 };
+  // Faellt die zweite Liste aus, laeuft die erste trotzdem - lieber halb sehen als nichts.
+  try { vor = await wogList(src, 'releases'); } catch (e) { /* naechster Lauf */ }
+  const seen = new Set(neu.list.map((x) => x.id));
+  const list = neu.list.concat(vor.list.filter((x) => !seen.has(x.id)));
+  return { list, pages: 1, bytes: neu.bytes + vor.bytes };
 }
 
 // WooCommerce (öffentliche Store-API): Kategorie-URL -> Kategorie-ID, dann Produkte seitenweise.
@@ -1909,13 +1932,14 @@ const clip = (t, n) => (String(t).length > n ? String(t).slice(0, n - 1) + '…'
 
 // Eine Nachricht an alle angemeldeten Geräte; tote Abos (404/410) werden vermerkt.
 async function pushOne(env, subs, v, msg, dead) {
+  const urgency = msg.p ? 'high' : 'normal';
   const payload = te.encode(JSON.stringify(msg));
   let sent = 0, failed = 0;
   await Promise.all(subs.map(async (sub) => {
     try {
       const res = await fetch(sub.endpoint, {
         method: 'POST',
-        headers: { Authorization: await vapidHeader(sub.endpoint, v), 'Content-Encoding': 'aes128gcm', 'Content-Type': 'application/octet-stream', TTL: '86400', Urgency: 'normal' },
+        headers: { Authorization: await vapidHeader(sub.endpoint, v), 'Content-Encoding': 'aes128gcm', 'Content-Type': 'application/octet-stream', TTL: '86400', Urgency: urgency },
         body: await encryptPush(sub, payload),
       });
       if (res.ok) sent++;
@@ -1939,10 +1963,14 @@ async function sendPush(env, events, test, budget) {
   // und Geraet. Was nicht mehr passt, kommt gebuendelt in einer Nachricht.
   const room = budget == null ? MAX_PUSH_EVENTS : Math.max(1, Math.floor((budget - 1) / subs.length));
   const n = Math.max(1, Math.min(MAX_PUSH_EVENTS, room));
-  const single = events.slice(0, n);
-  const rest = events.slice(n);
+  // Vorverkauf zuerst: wenn das Budget nur fuer ein paar Einzelnachrichten reicht,
+  // soll nicht ausgerechnet die wichtigste im Sammelposten verschwinden.
+  const reihe = events.slice().sort((a, b) => (b.pri ? 1 : 0) - (a.pri ? 1 : 0));
+  const single = reihe.slice(0, n);
+  const rest = reihe.slice(n);
   const pre = test ? 'Test: ' : '';
   const msgs = single.map((e, i) => ({
+    p: e.pri ? 1 : 0,
     t: clip(pre + KIND_LABEL[e.k] + (e.s ? ' · ' + e.s : '') + (e.l ? ' · ' + e.l : ''), 80),
     b: clip(clip(e.t, 90) + '\n' + describe(e), 220),
     // eigener tag je Meldung, sonst ersetzen sich die Nachrichten auf dem Gerät
@@ -1980,7 +2008,11 @@ function diff(src, list, prev, init, now, silentFrom) {
     let keep = null;   // Bezugspreis, der stehen bleibt (siehe unten)
     if (init) {
       const ev = { s: src.shop || src.name, id: it.id, t: it.t, p: it.p, a: it.a, u: it.u, i: it.i, g: it.g, l: langOf(it.t, it.u, src.url), at: now };
-      if (!old) { if (i < limit) events.push(Object.assign({ k: 'new' }, ev)); }
+      // Erscheint erst noch? Dann ist "bestellbar" ein Vorverkaufsstart, keine
+      // Wiederauffuellung - und genau das ist die Meldung, die keine Minute warten darf.
+      if (it.rd) ev.rd = it.rd;
+      const kuenftig = !!(it.rd && it.rd > now.slice(0, 10));
+      if (!old) { if (i < limit) events.push(Object.assign({ k: 'new' }, ev, kuenftig && it.a === 1 ? { pri: 1 } : null)); }
       else {
         const moved = old[0] != null && it.p != null ? it.p - old[0] : 0;
         if (it.a === 1 && Math.abs(moved) > PRICE_MIN + 0.004) {
@@ -1991,7 +2023,9 @@ function diff(src, list, prev, init, now, silentFrom) {
           // in Ein-Franken-Schritten trotzdem auf, sobald der Franken voll ist.
           keep = old[0];
         }
-        if (old[1] === 0 && it.a === 1) events.push(Object.assign({ k: 'stock' }, ev));
+        if (old[1] === 0 && it.a === 1) events.push(kuenftig
+          ? Object.assign({ k: 'pre', pri: 1 }, ev)
+          : Object.assign({ k: 'stock' }, ev));
       }
     }
     next[it.id] = [keep == null ? it.p : keep, it.a];
@@ -2003,10 +2037,14 @@ function diff(src, list, prev, init, now, silentFrom) {
 // der Preis um mehr als diesen Betrag bewegt hat – darunter ist es bei Importshops
 // meist nur der Wechselkurs.
 const PRICE_MIN = 1;
-const KIND_LABEL = { new: 'Neu', price: 'Preisänderung', stock: 'Wieder verfügbar' };
+const KIND_LABEL = { new: 'Neu', price: 'Preisänderung', stock: 'Wieder verfügbar', pre: 'Vorverkauf offen' };
+const deDate = (d) => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(d || '')); return m ? m[3] + '.' + m[2] + '.' + m[1] : ''; };
 function describe(ev) {
   if (ev.k === 'price') return chf(ev.o) + ' → ' + chf(ev.p) + (ev.p < ev.o ? ' ▼' : ' ▲');
-  return chf(ev.p) + (ev.k === 'new' ? (ev.a ? ' · verfügbar' : ' · ausverkauft') : ' · wieder verfügbar');
+  if (ev.k === 'pre') return chf(ev.p) + ' · jetzt bestellbar' + (ev.rd ? ' · erscheint ' + deDate(ev.rd) : '');
+  return chf(ev.p) + (ev.k === 'new'
+    ? (ev.a ? (ev.rd ? ' · bestellbar · erscheint ' + deDate(ev.rd) : ' · verfügbar') : ' · ausverkauft')
+    : ' · wieder verfügbar');
 }
 
 // Eine Prüfrunde: die am längsten ungeprüften Quellen, solange das Budget (Anfragen/Datenmenge)

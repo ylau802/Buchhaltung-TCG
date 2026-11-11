@@ -183,6 +183,7 @@ tr.sumrow td{border-top:1px solid var(--line);background:var(--surface-2)}
 .rc-gkopf{display:flex;flex-wrap:wrap;gap:8px;align-items:baseline;font-size:13px}
 .rc-gkopf b{font-weight:600}
 .rc-gporto{color:var(--gold)}
+.chip.c-vor{border-color:var(--pos);color:var(--pos)}
 .rc-gruppe>.cap{margin:-2px 0 7px}
 .rc-dupnote{margin:-2px 0 7px}
 .rc-dupnote .chk{margin-left:6px}
@@ -2699,7 +2700,7 @@ function wireFind(){
 /* ---------- News (Shop-Monitor, läuft im Worker) ---------- */
 const news={data:null,loading:false,bg:0,err:'',fr:'',lang:'',kind:'',src:'',q:'',showSrc:false,showWatch:false,urls:'',addName:'',addNameTouched:false,addFr:[],fedit:null,ren:null,cfName:'',cfKw:'',msgs:[],auto:false,chat:[],wurls:'',wbusy:false};
 const newsCatalog=()=>(news.data&&news.data.catalog)||['Pokémon','One Piece','Dragon Ball'];
-const NEWS_KIND={new:'Neu',price:'Preis',stock:'Wieder verfügbar'};
+const NEWS_KIND={new:'Neu',price:'Preis',stock:'Wieder verfügbar',pre:'Vorverkauf'};
 // Sprache, wie der Worker sie am Artikel erkannt hat (leer = steht nirgends).
 const NEWS_LANG={EN:'Englisch',DE:'Deutsch',FR:'Französisch',IT:'Italienisch',JP:'Japanisch',CN:'Chinesisch',KR:'Koreanisch',ES:'Spanisch',PT:'Portugiesisch'};
 // Ereignisse der letzten 24 h
@@ -2990,7 +2991,7 @@ function viewNews(){
   </div>`:''}
   ${news.showSrc&&d?`<div class="card">
     <h2>Quellen</h2>
-    <div class="cap">Shops, die geprüft werden. Unterstützt: <b>Shopify</b>-, <b>WooCommerce</b>-, <b>Shopware</b>-, <b>PrestaShop</b>-, <b>ePages</b>- (beide Fassungen), <b>CS-Cart</b>- und <b>SumUp</b>-Shops, dazu <b>Wix</b>-Shops, brack.ch, manor.ch, softridge.ch, friends-collective.site und jeder Shop mit <b>JSON-LD</b>-Liste (am besten die Kategorie-/Kollektions-URL, z. B. <span class="mono">https://cardtreasure.ch/collections/…</span> oder <span class="mono">https://calandamagic.ch/c/pokemon</span>) und wog.ch. Pro Quelle wird bei Neuem, Preisänderung und „wieder verfügbar“ gemeldet. Mehrere auf einmal: URLs mit Leerzeichen trennen – dann zählt nur der Shop-Name.</div>
+    <div class="cap">Shops, die geprüft werden. Unterstützt: <b>Shopify</b>-, <b>WooCommerce</b>-, <b>Shopware</b>-, <b>PrestaShop</b>-, <b>ePages</b>- (beide Fassungen), <b>CS-Cart</b>- und <b>SumUp</b>-Shops, dazu <b>Wix</b>-Shops, brack.ch, manor.ch, softridge.ch, friends-collective.site und jeder Shop mit <b>JSON-LD</b>-Liste (am besten die Kategorie-/Kollektions-URL, z. B. <span class="mono">https://cardtreasure.ch/collections/…</span> oder <span class="mono">https://calandamagic.ch/c/pokemon</span>) und wog.ch. Pro Quelle wird bei Neuem, Preisänderung und „wieder verfügbar“ gemeldet. Bei wog.ch zusätzlich, sobald ein angekündigter Artikel in den Vorverkauf geht – diese Meldung kommt bevorzugt und bleibt auf dem Handy stehen. Mehrere auf einmal: URLs mit Leerzeichen trennen – dann zählt nur der Shop-Name.</div>
     <label class="flab" for="nUrl">Adresse</label>
     <input type="text" id="nUrl" class="wide" placeholder="https://cardtreasure.ch/collections/…"
       autocapitalize="none" autocorrect="off" spellcheck="false" enterkeyhint="go" value="${esc(news.urls)}">
@@ -3045,7 +3046,7 @@ function viewNews(){
         ${e.i?`<img src="${esc(e.i)}" alt="" loading="lazy" style="width:36px;height:36px;object-fit:contain;border-radius:6px;flex:none;background:#fff;padding:2px">`:''}
         <div><a href="${esc(e.u)}" target="_blank" rel="noopener" style="color:var(--ink);font-weight:500;text-decoration:none">${esc(e.t)}</a>
           <div style="margin-top:2px"><span class="chip">${esc(e.s)}</span>${e.g?` <span class="chip ${e.g==='Pokémon'?'c-pk':''}">${esc(e.g)}</span>`:''}${e.l?` <span class="chip c-lang" title="${esc(NEWS_LANG[e.l]||e.l)}">${esc(e.l)}</span>`:''}</div></div></div></td>
-      <td data-l="Ereignis"><span class="chip ${e.k==='new'?'c-pk':''}">${NEWS_KIND[e.k]}</span></td>
+      <td data-l="Ereignis"><span class="chip ${e.k==='new'?'c-pk':''}${e.k==='pre'?' c-vor':''}">${NEWS_KIND[e.k]||e.k}</span></td>
       <td data-l="Preis" class="num"><span>${price(e)}</span></td>
       <td data-l="Status"><span><span class="tag-dot" style="background:${e.a?'var(--pos)':'var(--faint)'}"></span>${e.a?'verfügbar':'ausverkauft'}</span></td>
       <td data-l="Wann">${esc(ago(e.at))}</td>
