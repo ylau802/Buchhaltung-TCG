@@ -76,6 +76,20 @@ const FULL_EVERY = 50 * 60 * 1000;   // voller Durchlauf hoechstens stuendlich
 const WINDOW = { cscart: 1, sumup: 2, shopware: 1, prestashop: 2, jsonld: 1 };
 const COOL_AFTER_BLOCK = 30 * 60 * 1000;  // nach der ersten Sperre; danach jeweils doppelt
 const COOL_MAX = 6 * 60 * 60 * 1000;      // laenger als sechs Stunden warten wir nie
+// Mindestabstand zwischen zwei Abrufen derselben Quelle. Vorher kam jede Quelle so
+// oft dran, wie das Budget hergab - bei wenigen Quellen also alle fuenf Minuten, und
+// genau darauf reagieren die kleinen Laeden mit 403 oder 429. Einmal pro halbe Stunde
+// reicht fuer alles ausser der Schnellspur (wog.ch), die weiter jede Minute laeuft.
+const MIN_AGE = 30 * 60 * 1000;
+// Wer schon einmal dichtgemacht hat, wird dauerhaft seltener gefragt: je Sperre eine
+// halbe Stunde mehr Abstand, hoechstens sechs Stunden. Nach jedem geglueckten Abruf
+// faellt der Zaehler um eins, der Laden kommt also von selbst wieder auf Takt.
+const SLOW_MAX = 6 * 60 * 60 * 1000;
+const minAge = (h) => Math.min(SLOW_MAX, MIN_AGE * (1 + (h.slow || 0)));
+// Dieselbe "wieder verfuegbar"-Meldung nicht oefter als alle zwoelf Stunden. Wix-Shops
+// liefern ihre Seiten aus einem Zwischenspeicher: mal steht der Artikel als verfuegbar
+// drin, mal nicht, und jeder Wechsel waere sonst eine Meldung.
+const STOCK_COOL = 12 * 60 * 60 * 1000;
 // So viele Abrufe bekommt ein Shop je Lauf. Wer eine Schnittstelle anbietet,
 // antwortet klein und schnell und vertraegt mehr; wer ganze Seiten ausliefert,
 // bekommt weiterhin vier. Das entscheidet, wie lange eine Runde ueber alle
@@ -2007,6 +2021,7 @@ async function sendPush(env, events, test, budget) {
 function diff(src, list, prev, init, now, silentFrom) {
   const next = Object.assign({}, prev);
   const events = [];
+  const tNow = Date.parse(now);
   // wog.ch ist der Laden, bei dem Minuten zaehlen: jede Meldung von dort geht
   // dringend raus und leuchtet auf dem Handy auf, der Rest bleibt still.
   const eilig = src.type === 'wog';
@@ -2016,6 +2031,7 @@ function diff(src, list, prev, init, now, silentFrom) {
     i++;
     const old = prev[it.id];
     let keep = null;   // Bezugspreis, der stehen bleibt (siehe unten)
+    let seit = old && old[2] ? old[2] : null;   // wann zuletzt "wieder verfuegbar" gemeldet
     if (init) {
       const ev = { s: src.shop || src.name, id: it.id, t: it.t, p: it.p, a: it.a, u: it.u, i: it.i, g: it.g, l: langOf(it.t, it.u, src.url), at: now };
       // Erscheint erst noch? Dann ist "bestellbar" ein Vorverkaufsstart, keine
@@ -2033,12 +2049,16 @@ function diff(src, list, prev, init, now, silentFrom) {
           // in Ein-Franken-Schritten trotzdem auf, sobald der Franken voll ist.
           keep = old[0];
         }
-        if (old[1] === 0 && it.a === 1) events.push(kuenftig
-          ? Object.assign({ k: 'pre', pri: 1 }, ev)
-          : Object.assign({ k: 'stock' }, ev, eilig ? { pri: 1 } : null));
+        if (old[1] === 0 && it.a === 1 && (!seit || tNow - seit >= STOCK_COOL)) {
+          events.push(kuenftig
+            ? Object.assign({ k: 'pre', pri: 1 }, ev)
+            : Object.assign({ k: 'stock' }, ev, eilig ? { pri: 1 } : null));
+          seit = tNow;
+        }
       }
     }
-    next[it.id] = [keep == null ? it.p : keep, it.a];
+    const pNeu = keep == null ? it.p : keep;
+    next[it.id] = seit ? [pNeu, it.a, seit] : [pNeu, it.a];
   }
   return { next, events };
 }
@@ -2097,6 +2117,7 @@ async function runWatch(env, only, opts) {
     state.fix2 = FIX2;
   }
 
+  const manual = !!(opts && opts.manual);
   const todo = cfg.sources.filter((s) => !s.off && (!pick || pick.has(s.id)) && (!fast || onFast(s)))
     .sort((a, b) => ((state.src[a.id] || {}).lastCheck || '').localeCompare((state.src[b.id] || {}).lastCheck || ''));
   const batch = [];
@@ -2111,6 +2132,9 @@ async function runWatch(env, only, opts) {
     const h = state.src[s.id] || {};
     // Hat der Shop gerade dichtgemacht, erst nach der Ruhepause wieder anklopfen.
     if (h.cool && tNow < Date.parse(h.cool)) continue;
+    // Sonst der normale Mindestabstand - ausser auf der Schnellspur und bei einer
+    // Pruefung von Hand, die soll sofort etwas tun.
+    if (!fast && !manual && !pick && h.lastCheck && tNow - Date.parse(h.lastCheck) < minAge(h)) continue;
     const pg = h.pages || 1, by = h.bytes || 300000;
     const host = new URL(s.url).hostname;
     const used = perHost.get(host) || 0;
@@ -2178,6 +2202,7 @@ async function runWatch(env, only, opts) {
         const mins = Math.round(wait / 60000);
         st.lastError = new URL(s.url).hostname + ' drosselt gerade (' + err.replace(/^.*?: /, '') + ') – nächster Versuch in '
           + (mins >= 120 ? Math.round(mins / 60) + ' Stunden' : mins + ' Minuten');
+        st.slow = Math.min(11, (st.slow || 0) + 1);
       } else if (/HTTP 5\d\d/.test(err)) {
         // 5xx liegt beim Shop, nicht bei uns (530 schickt Cloudflare, wenn der
         // Laden hinter dem Schutzschild gerade nicht antwortet). Beim nächsten
@@ -2222,6 +2247,7 @@ async function runWatch(env, only, opts) {
     else if (!st.lastFull) st.lastFull = new Date(Date.parse(now) - Math.floor(Math.random() * FULL_EVERY)).toISOString();
     if (st.cool) delete st.cool;
     if (st.coolN) delete st.coolN;
+    if (st.slow) { st.slow -= 1; if (!st.slow) delete st.slow; }
     if (s.item && r.list[0]) st.cur = { p: r.list[0].p, a: r.list[0].a };
     if (r.cat && r.cat !== st.sw) st.sw = r.cat;
     // Katalog fuer die Suche: was diese Quelle gerade fuehrt, mit allem, was die
@@ -2327,7 +2353,7 @@ async function handleNews(request, env, url, tokenHash) {
   if (path === '/news/check' && m === 'POST') {
     let only = null;
     try { const b = await request.json(); if (b && Array.isArray(b.ids)) only = b.ids.map(String).slice(0, 8); } catch (e) { /* ohne Body: volle Runde */ }
-    const r = await runWatch(env, only);
+    const r = await runWatch(env, only, { manual: true });
     return view(r.cfg, r.state);
   }
 

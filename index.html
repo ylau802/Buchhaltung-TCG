@@ -3058,7 +3058,7 @@ function viewNews(){
         <a class="btn ghost sm" href="${esc(e.u)}" target="_blank" rel="noopener">Öffnen ↗</a></div></td>
     </tr>`).join('')||`<tr><td colspan="6"><div class="empty">${(d.events||[]).length?'Keine Treffer.':'Noch keine Ereignisse – die erste Prüfung merkt sich nur den aktuellen Stand, ab dann wird Neues hier gelistet.'}</div></td></tr>`}</tbody>
   </table></div>
-  <p class="chart-hint">Der Worker prüft alle 5 Minuten reihum die Quellen (bei vielen Quellen dauert ein voller Durchgang entsprechend länger). Bei Ereignissen kommt eine Push-Nachricht – je Meldung eine.</p>`
+  <p class="chart-hint">Jede Quelle wird höchstens alle 30 Minuten abgefragt – die kleinen Shops sperren sonst aus (HTTP 403/429). wog.ch läuft als einzige jede Minute, und seine Meldungen kommen dringend. Wer schon einmal gesperrt hat, wird automatisch seltener gefragt. „Wieder verfügbar“ meldet dieselbe Position höchstens alle 12 Stunden. „Jetzt prüfen“ geht trotzdem sofort los.</p>`
   :(news.err?'':`<div class="empty">Lade News…</div>`)}`;
 }
 function wireNews(){
