@@ -187,6 +187,8 @@ tr.sumrow td{border-top:1px solid var(--line);background:var(--surface-2)}
 .rc-gruppe>.cap{margin:-2px 0 7px}
 .rc-dupnote{margin:-2px 0 7px}
 .rc-warn{margin:-2px 0 7px;color:var(--neg)}
+/* Porto faellt sonst zwischen SKU und Haken durch – gelb, bis etwas drinsteht. */
+.rc-teil input.rc-pleer{border-color:var(--gold-soft);background:var(--gold-bg);color:var(--ink)}
 .rc-dupnote .chk{margin-left:6px}
 .legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--muted);margin-top:6px}
 .legend span{display:inline-flex;align-items:center;gap:6px}
@@ -1732,6 +1734,7 @@ function viewRcImport(){
   const porto=i=>{ const z=zs[i]; return `<span class="count">Porto</span>
       <input type="text" inputmode="decimal" data-rc="porto" data-i="${i}" value="${z.sammel?'0.00':(z.porto||'')}"
         placeholder="0.00" style="width:72px;text-align:right" ${z.sammel?'disabled':''}
+        class="${!z.sammel&&!num(z.porto)?'rc-pleer':''}"
         title="Was du der Post bezahlt hast – leer lassen, wenn noch offen">
       <label class="chk"><input type="checkbox" data-rcsam="${i}" ${z.sammel?'checked':''}> Sammelversand</label>`; };
   const bedarf=rcBedarf(), bestand=rcBestand();
@@ -1862,6 +1865,8 @@ function rcRefresh(i){
       const j=+s.dataset.j; s.textContent=teile[j]?CHF(z.preis*teile[j].anteil):'';
     }
   }
+  for(const pe of $$(`[data-rc=porto][data-i="${i}"]`))
+    pe.classList.toggle('rc-pleer',!z.sammel&&!num(z.porto));
   const bn=$('#rcBanner'); if(bn) bn.innerHTML=rcBanner();
   for(const sp of $$('[data-gporto]')){
     const g=rcState.gruppen[+sp.dataset.gporto]; if(g) sp.textContent=rcGPortoText(g); }
