@@ -3646,7 +3646,9 @@ async function applyBulk(L,list){
   if(!Object.keys(changes).length){ toast('Bitte mindestens ein Feld ausfüllen'); return; }
   const txt=Object.entries(changes).map(([k,v])=>`${BULK_FIELDS[L].find(f=>f[0]===k)[1]} → ${v}`).join('\n');
   if(!confirm(`${list.length} Einträge ändern?\n\n${txt}\n\nVorher wird automatisch ein verschlüsseltes Backup heruntergeladen.`)) return;
-  try{ await exportVault(); }catch(e){}
+  let gesichert=false;
+  try{ gesichert=await exportVault(); }catch(e){ gesichert=false; }
+  if(!gesichert){ toast('Abgebrochen – ohne Backup wird nichts geändert'); return; }
   const ids=new Set(list.map(r=>r.id));
   store[L]=store[L].map(r=>ids.has(r.id)?{...r,...changes}:r);
   persist(); closeForm(); draw();
@@ -3733,6 +3735,29 @@ async function exportCSV(){
   toast('CSV heruntergeladen');
 }
 function today(){ return new Date().toISOString().slice(0,10); }
+// Ein verschluesseltes Backup gehoert zur Buchhaltung, nicht in den Download-Ordner.
+// Wo der Browser den Speichern-Dialog kennt (Chrome, Edge), darf der Ordner gewaehlt
+// werden - und zwar nur einmal: Chrome merkt sich je "id", wo es zuletzt hinging.
+// Safari und iOS kennen den Dialog nicht, dort bleibt es beim normalen Download.
+async function speichernAls(name,data,mime,id){
+  const typ=mime||'text/plain';
+  const endung='.'+name.split('.').pop();
+  if(typeof window.showSaveFilePicker==='function'){
+    try{
+      const h=await window.showSaveFilePicker({id:id||'ylsave',suggestedName:name,
+        types:[{description:'YL Buchhaltung',accept:{[typ]:[endung]}}]});
+      const w=await h.createWritable();
+      await w.write(typeof data==='string'?new Blob([data],{type:typ+';charset=utf-8'}):data);
+      await w.close();
+      return 'gespeichert';
+    }catch(e){
+      if(e&&e.name==='AbortError') return 'abgebrochen';
+      // Dialog nicht erlaubt (etwa ohne Klick davor) – dann der normale Weg.
+    }
+  }
+  downloadFile(name,data,mime);
+  return 'geladen';
+}
 function downloadFile(filename,data,mime){
   const isText=typeof data==='string';
   const type=mime||(isText?'text/plain':'application/octet-stream');
@@ -3799,11 +3824,13 @@ function exportJSON(){
   toast('Unverschlüsseltes JSON heruntergeladen');
 }
 async function exportVault(){
-  if(!session)return;
+  if(!session)return false;
   const payload=allLedgers();
   const blob=await encryptJSON(payload,session.key,session.salt);
-  downloadFile(`yingway-backup_${today()}.vault`,blob,'text/plain');
-  toast('Verschlüsseltes Backup heruntergeladen');
+  const r=await speichernAls(`yingway-backup_${today()}.vault`,blob,'text/plain','ylbackup');
+  if(r==='abgebrochen'){ toast('Backup abgebrochen'); return false; }
+  toast(r==='gespeichert'?'Verschlüsseltes Backup gespeichert':'Verschlüsseltes Backup heruntergeladen');
+  return true;
 }
 function importData(){
   const inp=document.createElement('input'); inp.type='file';

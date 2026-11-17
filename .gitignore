@@ -11,3 +11,6 @@ dist/
 
 # lokale Claude-Code-Einstellungen
 .claude/
+
+# Verschluesselte Backups aus der App
+Backups/
